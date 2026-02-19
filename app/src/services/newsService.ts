@@ -1,5 +1,7 @@
-import type { NewsItem, NewsResponse, RegionType } from '@/types/news';
+// import type { NewsItem, NewsResponse, RegionType } from '@/types/news';
+import type { NewsResponse, RegionType } from '@/types/news';
 
+// REST OF YOUR CODE REMAINS THE SAME
 const API_URL = 'https://nexus-news-api.cc-dennar.workers.dev';
 
 export const newsService = {
