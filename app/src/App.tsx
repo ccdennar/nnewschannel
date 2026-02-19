@@ -66,9 +66,9 @@ function App() {
             <Info className="h-4 w-4" />
             <AlertTitle>Welcome to Nexus</AlertTitle>
             <AlertDescription className="pr-8">
-              Nexus aggregates real-time news from multiple free-tier APIs including HackerNews, 
+              {/* Nexus aggregates real-time news from multiple free-tier APIs including HackerNews, 
               GDELT, and various RSS feeds. For production use with higher rate limits, 
-              configure API keys for NewsData.io, GNews, and Currents API.
+              configure API keys for NewsData.io, GNews, and Currents API. */}
               <Button
                 variant="ghost"
                 size="icon"
