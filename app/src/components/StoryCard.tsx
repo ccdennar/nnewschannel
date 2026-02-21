@@ -21,12 +21,9 @@ import {
 import type { NewsStory, NewsItem } from '@/types/news';
 import { SOURCE_BIAS } from '@/types/news';
 
-// Support both type naming conventions
-type Story = NewsStory | NewsItem;
-
 interface StoryCardProps {
-  story: Story;
-  article?: Story; // Alias for backward compatibility
+  story: NewsItem;
+  article?: NewsItem; // Alias for backward compatibility
   variant?: 'featured' | 'standard' | 'compact';
   index?: number;
 }
