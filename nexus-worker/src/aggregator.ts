@@ -15,9 +15,18 @@ export class NewsAggregator {
     NEWSDATA_API_KEY?: string;
     GNEWS_API_KEY?: string;
     CURRENTS_API_KEY?: string;
+    WORLD_NEWS_API_KEY?: string;
+    NEWSDATA_API_KEY?: string;
+    GUARDIAN_API_KEY?: string; // 'test' works for development
   };
 
-  constructor(env: { NEWSDATA_API_KEY?: string; GNEWS_API_KEY?: string; CURRENTS_API_KEY?: string }) {
+  constructor(env: { 
+    NEWSDATA_API_KEY?: string; 
+    GNEWS_API_KEY?: string; 
+    CURRENTS_API_KEY?: string;
+    WORLD_NEWS_API_KEY?: string;
+    GUARDIAN_API_KEY?: string;
+  }) {
     this.env = env;
   }
 
@@ -35,13 +44,25 @@ export class NewsAggregator {
       case 'currents-api':
         return this.fetchCurrentsAPI(region, config);
       
-      // Free APIs
+      // Free APIs (generous/limited keys)
+      case 'world-news-api':
+        return this.fetchWorldNewsAPI(region, config);
+      case 'guardian-api':
+        return this.fetchGuardianAPI(region, config);
+      
+      // Free APIs (no key required)
       case 'hackernews':
         return { articles: await this.fetchHackerNews(), source, success: true };
       case 'gdelt-africa':
       case 'gdelt-gcc':
       case 'gdelt-global':
         return this.fetchGDELT(region, config);
+      case 'reddit-worldnews':
+        return this.fetchReddit('worldnews', region);
+      case 'reddit-technology':
+        return this.fetchReddit('technology', region);
+      case 'reddit-news':
+        return this.fetchReddit('news', region);
       
       // Mainstream RSS Sources
       case 'rss-bbc-africa':
@@ -50,6 +71,8 @@ export class NewsAggregator {
         return this.fetchRSS('https://feeds.bbci.co.uk/news/world/rss.xml', region, 'BBC World');
       case 'rss-bbc-asia':
         return this.fetchRSS('https://feeds.bbci.co.uk/news/world/asia/rss.xml', region, 'BBC Asia');
+      case 'rss-bbc-tech':
+        return this.fetchRSS('https://feeds.bbci.co.uk/news/technology/rss.xml', region, 'BBC Tech');
       case 'rss-xinhua':
         return this.fetchRSS('http://www.xinhuanet.com/english/rss/worldrss.xml', region, 'Xinhua');
       case 'rss-nikkei':
@@ -66,6 +89,34 @@ export class NewsAggregator {
         return this.fetchRSS('https://timesofindia.indiatimes.com/rssfeedstopstories.cms', region, 'Times of India');
       case 'rss-japantimes':
         return this.fetchRSS('https://www.japantimes.co.jp/feed/', region, 'Japan Times');
+      
+      // Additional High-Quality RSS Sources
+      case 'rss-cnn-world':
+        return this.fetchRSS('http://rss.cnn.com/rss/edition_world.rss', region, 'CNN World');
+      case 'rss-reuters':
+        return this.fetchRSS('https://www.reutersagency.com/feed/?taxonomy=markets&post_type=reuters-best', region, 'Reuters');
+      case 'rss-ft-world':
+        return this.fetchRSS('https://www.ft.com/world?format=rss', region, 'Financial Times');
+      case 'rss-economist':
+        return this.fetchRSS('https://www.economist.com/latest/rss.xml', region, 'The Economist');
+      case 'rss-techcrunch':
+        return this.fetchRSS('https://techcrunch.com/feed/', region, 'TechCrunch');
+      case 'rss-theverge':
+        return this.fetchRSS('https://www.theverge.com/rss/index.xml', region, 'The Verge');
+      case 'rss-wired':
+        return this.fetchRSS('https://www.wired.com/feed/rss', region, 'Wired');
+      case 'rss-cna-singapore':
+        return this.fetchRSS('https://www.channelnewsasia.com/rss', region, 'CNA');
+      case 'rss-straits-times':
+        return this.fetchRSS('https://www.straitstimes.com/news/asia/rss.xml', region, 'Straits Times');
+      case 'rss-guardian-world':
+        return this.fetchRSS('https://www.theguardian.com/world/rss', region, 'Guardian World');
+      case 'rss-guardian-tech':
+        return this.fetchRSS('https://www.theguardian.com/technology/rss', region, 'Guardian Tech');
+      case 'rss-axios':
+        return this.fetchRSS('https://api.axios.com/feed/', region, 'Axios');
+      case 'rss-politico':
+        return this.fetchRSS('https://www.politico.com/rss/politicopicks.xml', region, 'Politico');
       
       // === ISRAELI SOURCES ===
       case 'rss-timesofisrael':
@@ -238,7 +289,122 @@ export class NewsAggregator {
     }
   }
 
-  // ==================== HackerNews API ====================
+  // ==================== World News API (500/day free) ====================
+  private async fetchWorldNewsAPI(region: string, config: RegionConfig[string]): Promise<NewsSourceResult> {
+    if (!this.env.WORLD_NEWS_API_KEY) {
+      return { articles: [], source: 'world-news-api', success: false, error: 'No API key' };
+    }
+
+    try {
+      let url = `https://api.worldnewsapi.com/search-news?api-key=${this.env.WORLD_NEWS_API_KEY}&number=20&language=en`;
+      
+      // Add region filters
+      if (region === 'africa') {
+        url += '&source-country=ng,za,ke,eg,gh,et';
+      } else if (region === 'asia') {
+        url += '&source-country=cn,jp,in,kr,id,th,vn';
+      } else if (region === 'persian-gulf' || region === 'gcc') {
+        url += '&source-country=ae,sa,qa,kw,bh,om';
+      }
+
+      const response = await fetch(url, { 
+        cf: { cacheTtl: 300 },
+        headers: { 'Accept': 'application/json' }
+      });
+      
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+
+      const data = await response.json();
+      
+      const articles: NewsItem[] = (data.news || []).map((item: any, idx: number) => ({
+        id: `wn-${idx}-${Date.now()}`,
+        title: item.title,
+        description: item.text?.substring(0, 300) || '',
+        url: item.url,
+        imageUrl: item.image,
+        publishedAt: item.publish_date,
+        source: item.source_name || 'World News API',
+        sourceRegion: region,
+        category: item.category,
+        language: item.language
+      }));
+
+      return { articles, source: 'world-news-api', success: true };
+    } catch (error) {
+      return { 
+        articles: [], 
+        source: 'world-news-api', 
+        success: false, 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      };
+    }
+  }
+
+  // ==================== The Guardian API (FREE - Unlimited with 'test' key) ====================
+  private async fetchGuardianAPI(region: string, config: RegionConfig[string]): Promise<NewsSourceResult> {
+    try {
+      // Use 'test' for development, or get free key from open-platform.theguardian.com
+      const apiKey = this.env.GUARDIAN_API_KEY || 'test';
+      
+      // Map regions to Guardian sections/tags
+      let section = 'world';
+      let query = '';
+      
+      if (region === 'africa') {
+        query = 'africa';
+      } else if (region === 'asia') {
+        query = 'asia';
+      } else if (region === 'persian-gulf' || region === 'gcc') {
+        query = 'middleeast';
+      } else if (region === 'tech') {
+        section = 'technology';
+      }
+
+      let url = `https://content.guardianapis.com/search?api-key=${apiKey}&section=${section}&show-fields=trailText,thumbnail,byline,headline&page-size=20&order-by=newest`;
+      
+      if (query) {
+        url += `&q=${encodeURIComponent(query)}`;
+      }
+
+      const response = await fetch(url, { 
+        cf: { cacheTtl: 300 },
+        headers: { 'Accept': 'application/json' }
+      });
+      
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+
+      const data = await response.json();
+      
+      const articles: NewsItem[] = (data.response?.results || []).map((item: any) => ({
+        id: `guardian-${item.id}`,
+        title: item.webTitle,
+        description: item.fields?.trailText || item.fields?.headline || '',
+        url: item.webUrl,
+        imageUrl: item.fields?.thumbnail,
+        publishedAt: item.webPublicationDate,
+        source: 'The Guardian',
+        sourceRegion: region,
+        category: item.sectionName?.toLowerCase(),
+        language: 'en',
+        author: item.fields?.byline
+      }));
+
+      return { articles, source: 'guardian-api', success: true };
+    } catch (error) {
+      return { 
+        articles: [], 
+        source: 'guardian-api', 
+        success: false, 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      };
+    }
+  }
+
+  // ==================== HackerNews API (FREE - No limits) ====================
   async fetchHackerNews(): Promise<NewsItem[]> {
     try {
       const topStoriesRes = await fetch('https://hacker-news.firebaseio.com/v0/topstories.json', {
@@ -286,16 +452,16 @@ export class NewsAggregator {
     }
   }
 
-  // ==================== GDELT API ====================
+  // ==================== GDELT API (FREE - No limits) ====================
   private async fetchGDELT(region: string, config: RegionConfig[string]): Promise<NewsSourceResult> {
     try {
       let query = '';
       if (region === 'africa') {
         query = 'africa sourcecountry:NG OR sourcecountry:ZA OR sourcecountry:KE OR sourcecountry:EG';
       } else if (region === 'persian-gulf' || region === 'gcc') {
-        query = 'gulf sourcecountry:AE OR sourcecountry:SA OR sourcecountry:QA OR sourcecountry:KW OR sourcecountry:IL OR sourcecountry:IR';
+        query = 'gulf sourcecountry:AE OR sourcecountry:SA OR sourcecountry:QA OR sourcecountry:KW OR sourcecountry:BH OR sourcecountry:OM';
       } else if (region === 'asia') {
-        query = 'asia sourcecountry:IN OR sourcecountry:CN OR sourcecountry:JP OR sourcecountry:KR';
+        query = 'asia sourcecountry:IN OR sourcecountry:CN OR sourcecountry:JP OR sourcecountry:KR OR sourcecountry:ID OR sourcecountry:TH';
       } else {
         query = 'world';
       }
@@ -335,14 +501,58 @@ export class NewsAggregator {
     }
   }
 
-  // ==================== RSS Feed Parser ====================
+  // ==================== Reddit API (FREE - No key required for read-only) ====================
+  private async fetchReddit(subreddit: string, region: string): Promise<NewsSourceResult> {
+    try {
+      const url = `https://www.reddit.com/r/${subreddit}/hot.json?limit=20`;
+      
+      const response = await fetch(url, { 
+        cf: { cacheTtl: 300 },
+        headers: { 
+          'User-Agent': 'NexusNews/1.0 (News Aggregator)',
+          'Accept': 'application/json'
+        }
+      });
+      
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+
+      const data = await response.json();
+      
+      const articles: NewsItem[] = (data.data?.children || []).map((child: any) => ({
+        id: `reddit-${child.data.id}`,
+        title: child.data.title,
+        description: `Score: ${child.data.score} | Comments: ${child.data.num_comments} | Subreddit: r/${subreddit}`,
+        url: `https://reddit.com${child.data.permalink}`,
+        imageUrl: child.data.thumbnail && child.data.thumbnail.startsWith('http') ? child.data.thumbnail : undefined,
+        publishedAt: new Date(child.data.created_utc * 1000).toISOString(),
+        source: `r/${subreddit}`,
+        sourceRegion: region,
+        category: subreddit,
+        language: 'en',
+        author: child.data.author
+      }));
+
+      return { articles, source: `reddit-${subreddit}`, success: true };
+    } catch (error) {
+      return { 
+        articles: [], 
+        source: `reddit-${subreddit}`, 
+        success: false, 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      };
+    }
+  }
+
+  // ==================== RSS Feed Parser (FREE - Unlimited) ====================
   private async fetchRSS(url: string, region: string, sourceName: string): Promise<NewsSourceResult> {
     try {
       const response = await fetch(url, { 
         cf: { cacheTtl: 300 },
         headers: { 
           'Accept': 'application/rss+xml, application/xml, text/xml, */*',
-          'User-Agent': 'NexusNews/1.0'
+          'User-Agent': 'NexusNews/1.0 (News Aggregator Bot)'
         }
       });
       
@@ -358,7 +568,7 @@ export class NewsAggregator {
         title: item.title,
         description: this.cleanHtml(item.description || ''),
         url: item.link,
-        imageUrl: item.enclosure?.url,
+        imageUrl: item.enclosure?.url || this.extractImageFromContent(item['content:encoded'] || item.description),
         publishedAt: item.pubDate ? new Date(item.pubDate).toISOString() : new Date().toISOString(),
         source: sourceName,
         sourceRegion: region,
@@ -385,6 +595,7 @@ export class NewsAggregator {
     const descRegex = /<description[^>]*>(?:<!\[CDATA\[)?([\s\S]*?)(?:\]\]>)?<\/description>/i;
     const pubDateRegex = /<pubDate[^>]*>([\s\S]*?)<\/pubDate>/i;
     const enclosureRegex = /<enclosure[^>]+url="([^"]+)"/i;
+    const contentRegex = /<content:encoded[^>]*>(?:<!\[CDATA\[)?([\s\S]*?)(?:\]\]>)?<\/content:encoded>/i;
 
     let match;
     while ((match = itemRegex.exec(xmlText)) !== null) {
@@ -395,6 +606,7 @@ export class NewsAggregator {
       const descMatch = descRegex.exec(itemContent);
       const pubDateMatch = pubDateRegex.exec(itemContent);
       const enclosureMatch = enclosureRegex.exec(itemContent);
+      const contentMatch = contentRegex.exec(itemContent);
 
       if (titleMatch && linkMatch) {
         items.push({
@@ -402,12 +614,19 @@ export class NewsAggregator {
           link: this.decodeXmlEntities(linkMatch[1].trim()),
           description: descMatch ? this.decodeXmlEntities(descMatch[1].trim()) : '',
           pubDate: pubDateMatch ? pubDateMatch[1].trim() : undefined,
-          enclosure: enclosureMatch ? { url: enclosureMatch[1] } : undefined
+          enclosure: enclosureMatch ? { url: enclosureMatch[1] } : undefined,
+          'content:encoded': contentMatch ? contentMatch[1] : undefined
         });
       }
     }
 
     return items;
+  }
+
+  private extractImageFromContent(content: string | undefined): string | undefined {
+    if (!content) return undefined;
+    const imgMatch = content.match(/<img[^>]+src="([^"]+)"/i);
+    return imgMatch ? imgMatch[1] : undefined;
   }
 
   private decodeXmlEntities(text: string): string {
@@ -418,7 +637,8 @@ export class NewsAggregator {
       .replace(/&quot;/g, '"')
       .replace(/&apos;/g, "'")
       .replace(/&#(\d+);/g, (_, dec) => String.fromCharCode(parseInt(dec, 10)))
-      .replace(/&#x([0-9a-f]+);/gi, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
+      .replace(/&#x([0-9a-f]+);/gi, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
+      .replace(/<!\[CDATA\[|\]\]>/g, '');
   }
 
   private cleanHtml(html: string): string {
@@ -432,6 +652,7 @@ export class NewsAggregator {
   async fetchTechFromNewsAPIs(): Promise<NewsItem[]> {
     const articles: NewsItem[] = [];
     
+    // Try NewsData.io if available
     if (this.env.NEWSDATA_API_KEY) {
       try {
         const url = `https://newsdata.io/api/1/latest?apikey=${this.env.NEWSDATA_API_KEY}&category=technology&language=en&size=10`;
@@ -454,6 +675,16 @@ export class NewsAggregator {
       } catch (error) {
         console.error('Tech fetch from NewsData error:', error);
       }
+    }
+
+    // Try Guardian Tech
+    try {
+      const guardianResult = await this.fetchGuardianAPI('tech', { countries: ['global'] });
+      if (guardianResult.success) {
+        articles.push(...guardianResult.articles);
+      }
+    } catch (error) {
+      console.error('Tech fetch from Guardian error:', error);
     }
 
     return articles;
