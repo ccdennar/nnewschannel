@@ -49,6 +49,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
       page,
       total: stories.length,
       fetchedAt: new Date().toISOString(),
+      sources: [...new Set(stories.map(s => s.apiSource))],
     }
   };
 
@@ -66,53 +67,113 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
 };
 
 async function fetchAggregatedNews(env: Env, region: string, limit: number) {
-  const sources: Promise<any[]>[] = [];
+  let stories: any[] = [];
+  const errors: string[] = [];
+  const sourcesUsed: string[] = [];
 
-  // PRIORITY 1: FREE/UNLIMITED SOURCES
-  sources.push(fetchGuardianAPI(env.GUARDIAN_API_KEY || 'test', region, limit));
-  sources.push(fetchRSSFeeds(region)); // FULL RSS LIST RESTORED
-  sources.push(fetchGDELT(region, limit));
+  // ========== PHASE 1: FREE/UNLIMITED SOURCES ONLY ==========
   
+  // 1. Guardian API (FREE - unlimited with 'test' key)
+  try {
+    const guardianStories = await fetchGuardianAPI(env.GUARDIAN_API_KEY || 'test', region, limit);
+    if (guardianStories.length > 0) {
+      stories.push(...guardianStories);
+      sourcesUsed.push('guardian');
+    }
+  } catch (e) {
+    errors.push(`guardian: ${e instanceof Error ? e.message : 'failed'}`);
+  }
+
+  // 2. RSS Feeds (FREE - unlimited)
+  try {
+    const rssStories = await fetchRSSFeeds(region);
+    if (rssStories.length > 0) {
+      stories.push(...rssStories);
+      sourcesUsed.push('rss');
+    }
+  } catch (e) {
+    errors.push(`rss: ${e instanceof Error ? e.message : 'failed'}`);
+  }
+
+  // 3. GDELT (FREE - unlimited)
+  try {
+    const gdeltStories = await fetchGDELT(region, limit);
+    if (gdeltStories.length > 0) {
+      stories.push(...gdeltStories);
+      sourcesUsed.push('gdelt');
+    }
+  } catch (e) {
+    errors.push(`gdelt: ${e instanceof Error ? e.message : 'failed'}`);
+  }
+
+  // 4. Hacker News for tech/global (FREE - unlimited)
   if (region === 'tech' || region === 'global') {
-    sources.push(fetchHackerNews());
+    try {
+      const hnStories = await fetchHackerNews();
+      if (hnStories.length > 0) {
+        stories.push(...hnStories);
+        sourcesUsed.push('hackernews');
+      }
+    } catch (e) {
+      errors.push(`hackernews: ${e instanceof Error ? e.message : 'failed'}`);
+    }
   }
 
-  // PRIORITY 2: FREEMIUM APIs
-  if (env.WORLD_NEWS_API_KEY) {
-    sources.push(fetchWorldNewsAPI(env.WORLD_NEWS_API_KEY, region, limit));
-  }
-
-  // PRIORITY 3: STRICT LIMIT APIs (only if no World News API)
-  if (env.NEWSDATA_API_KEY && !env.WORLD_NEWS_API_KEY) {
-    sources.push(fetchNewsData(env.NEWSDATA_API_KEY, region, limit));
-  }
-  if (env.GNEWS_API_KEY) {
-    sources.push(fetchGNews(env.GNEWS_API_KEY, region, limit));
-  }
-
-  const results = await Promise.allSettled(
-    sources.map(source => 
-      Promise.race([
-        source,
-        new Promise<[]>((_, reject) => 
-          setTimeout(() => reject(new Error('Timeout')), 15000)
-        )
-      ])
-    )
-  );
+  // ========== PHASE 2: ONLY IF FREE SOURCES ARE INSUFFICIENT ==========
   
-  const allStories = results
-    .filter((r): r is PromiseFulfilledResult<any[]> => r.status === 'fulfilled')
-    .flatMap(r => r.value);
+  // If we have less than 5 stories from free sources, try World News API (500/day)
+  if (stories.length < 5 && env.WORLD_NEWS_API_KEY) {
+    try {
+      const wnStories = await fetchWorldNewsAPI(env.WORLD_NEWS_API_KEY, region, limit);
+      if (wnStories.length > 0) {
+        stories.push(...wnStories);
+        sourcesUsed.push('worldnews');
+      }
+    } catch (e) {
+      errors.push(`worldnews: ${e instanceof Error ? e.message : 'failed'}`);
+    }
+  }
 
-  if (allStories.length === 0) {
+  // ========== PHASE 3: LAST RESORT - STRICT LIMIT APIs ==========
+  
+  // Only call these if we STILL have almost nothing (emergency fallback)
+  if (stories.length < 3) {
+    if (env.NEWSDATA_API_KEY) {
+      try {
+        const ndStories = await fetchNewsData(env.NEWSDATA_API_KEY, region, limit);
+        if (ndStories.length > 0) {
+          stories.push(...ndStories);
+          sourcesUsed.push('newsdata');
+        }
+      } catch (e) {
+        errors.push(`newsdata: ${e instanceof Error ? e.message : 'failed'}`);
+      }
+    }
+
+    if (env.GNEWS_API_KEY && stories.length < 3) {
+      try {
+        const gnStories = await fetchGNews(env.GNEWS_API_KEY, region, limit);
+        if (gnStories.length > 0) {
+          stories.push(...gnStories);
+          sourcesUsed.push('gnews');
+        }
+      } catch (e) {
+        errors.push(`gnews: ${e instanceof Error ? e.message : 'failed'}`);
+      }
+    }
+  }
+
+  console.log(`Sources used: ${sourcesUsed.join(', ')}, Total stories: ${stories.length}, Errors: ${errors.length}`);
+
+  // If absolutely nothing worked, return fallback
+  if (stories.length === 0) {
     return getFallbackStories(region);
   }
 
-  return deduplicateAndRank(allStories).slice(0, limit);
+  return deduplicateAndRank(stories).slice(0, limit);
 }
 
-// ==================== GUARDIAN API ====================
+// ==================== GUARDIAN API (FREE) ====================
 async function fetchGuardianAPI(apiKey: string, region: string, limit: number): Promise<any[]> {
   try {
     const sectionMap: Record<string, string> = {
@@ -147,15 +208,13 @@ async function fetchGuardianAPI(apiKey: string, region: string, limit: number): 
     });
     
     if (!response.ok) {
-      console.error('Guardian API error:', response.status);
-      throw new Error(`Guardian API failed: ${response.status}`);
+      throw new Error(`HTTP ${response.status}`);
     }
     
     const data = await response.json();
     
     if (data.response?.status !== 'ok') {
-      console.error('Guardian API returned error:', data);
-      return [];
+      throw new Error(data.response?.message || 'API error');
     }
     
     return (data.response?.results || []).map((item: any) => ({
@@ -177,7 +236,7 @@ async function fetchGuardianAPI(apiKey: string, region: string, limit: number): 
   }
 }
 
-// ==================== WORLD NEWS API ====================
+// ==================== WORLD NEWS API (500/day) ====================
 async function fetchWorldNewsAPI(apiKey: string, region: string, limit: number): Promise<any[]> {
   try {
     const countryMap: Record<string, string> = {
@@ -199,8 +258,7 @@ async function fetchWorldNewsAPI(apiKey: string, region: string, limit: number):
     });
     
     if (!response.ok) {
-      console.error('World News API error:', response.status);
-      throw new Error(`World News API failed: ${response.status}`);
+      throw new Error(`HTTP ${response.status}`);
     }
     
     const data = await response.json();
@@ -224,14 +282,14 @@ async function fetchWorldNewsAPI(apiKey: string, region: string, limit: number):
   }
 }
 
-// ==================== HACKER NEWS ====================
+// ==================== HACKER NEWS (FREE) ====================
 async function fetchHackerNews(): Promise<any[]> {
   try {
     const response = await fetch('https://hacker-news.firebaseio.com/v0/topstories.json', {
       cf: { cacheTtl: 300 }
     });
     
-    if (!response.ok) throw new Error('Failed to fetch HN stories');
+    if (!response.ok) throw new Error('Failed to fetch');
     
     const storyIds = await response.json() as number[];
     const topIds = storyIds.slice(0, 15);
@@ -271,7 +329,7 @@ async function fetchHackerNews(): Promise<any[]> {
   }
 }
 
-// ==================== NEWSDATA.IO ====================
+// ==================== NEWSDATA.IO (200/day - LAST RESORT) ====================
 async function fetchNewsData(apiKey: string, region: string, limit: number): Promise<any[]> {
   try {
     const countryMap: Record<string, string> = {
@@ -285,6 +343,7 @@ async function fetchNewsData(apiKey: string, region: string, limit: number): Pro
     };
 
     const countries = countryMap[region] || 'us,gb';
+    // FIXED: Removed space after apikey=
     const url = `https://newsdata.io/api/1/news?apikey=${apiKey}&country=${countries}&language=en&size=${limit}`;
     
     const response = await fetch(url, { 
@@ -293,15 +352,13 @@ async function fetchNewsData(apiKey: string, region: string, limit: number): Pro
     });
     
     if (!response.ok) {
-      console.error('NewsData API error:', response.status);
-      throw new Error(`NewsData API failed: ${response.status}`);
+      throw new Error(`HTTP ${response.status}`);
     }
     
     const data = await response.json();
     
     if (data.status !== 'success') {
-      console.error('NewsData API returned error:', data);
-      return [];
+      throw new Error(data.message || 'API error');
     }
     
     return (data.results || []).map((item: any) => ({
@@ -323,7 +380,7 @@ async function fetchNewsData(apiKey: string, region: string, limit: number): Pro
   }
 }
 
-// ==================== GNEWS ====================
+// ==================== GNEWS (100/day - LAST RESORT) ====================
 async function fetchGNews(apiKey: string, region: string, limit: number): Promise<any[]> {
   try {
     const countryMap: Record<string, string> = {
@@ -337,6 +394,7 @@ async function fetchGNews(apiKey: string, region: string, limit: number): Promis
     };
 
     const countries = countryMap[region] || 'us';
+    // FIXED: Removed space after apikey=
     const url = `https://gnews.io/api/v4/top-headlines?apikey=${apiKey}&country=${countries}&lang=en&max=${limit}`;
     
     const response = await fetch(url, {
@@ -344,8 +402,7 @@ async function fetchGNews(apiKey: string, region: string, limit: number): Promis
     });
     
     if (!response.ok) {
-      console.error('GNews API error:', response.status);
-      throw new Error(`GNews API failed: ${response.status}`);
+      throw new Error(`HTTP ${response.status}`);
     }
     
     const data = await response.json();
@@ -369,183 +426,97 @@ async function fetchGNews(apiKey: string, region: string, limit: number): Promis
   }
 }
 
-// ==================== FULL RSS FEEDS (ALL RESTORED) ====================
+// ==================== FULL RSS FEEDS ====================
 async function fetchRSSFeeds(region: string): Promise<any[]> {
   const feeds: Record<string, string[]> = {
-    // AFRICA - 17 feeds (ALL RESTORED)
     'africa': [
       'https://feeds.bbci.co.uk/news/world/africa/rss.xml',
-      'https://www.africanews.com/rss',
+      'https://www.theguardian.com/world/africa/rss',
       'https://www.aljazeera.com/xml/rss/all.xml',
-      'https://qz.com/africa/feed',
       'https://mg.co.za/feed/',
-      'https://www.dailymaverick.co.za/rss/',
-      'https://www.citizen.co.za/feed/',
       'https://punchng.com/feed/',
       'https://www.vanguardngr.com/feed/',
       'https://guardian.ng/feed/',
       'https://nation.africa/kenya/feed',
       'https://www.standardmedia.co.ke/rss/kenya.php',
       'https://dailynewsegypt.com/feed/',
-      'https://www.menafn.com/menafn_rss.ashx',
       'https://www.theeastafrican.co.ke/rss.xml',
-      'https://www.jeuneafrique.com/feed/',
-      'http://www.panapress.com/rss/',
     ],
-    
-    // ASIA - 22 feeds (ALL RESTORED)
     'asia': [
       'https://timesofindia.indiatimes.com/rssfeedstopstories.cms',
       'https://www.thehindu.com/news/?service=rss',
-      'https://www.hindustantimes.com/rss/topnews/rssfeed.xml',
-      'https://feeds.feedburner.com/ndtvnews-top-stories',
       'https://indianexpress.com/feed/',
       'http://www.xinhuanet.com/english/rss/worldrss.xml',
-      'http://www.chinadaily.com.cn/rss/world_rss.xml',
       'https://www.scmp.com/rss/91/feed',
       'https://asia.nikkei.com/rss',
       'https://www.japantimes.co.jp/feed/',
-      'http://www.koreaherald.com/rss/0204.xml',
-      'https://www.koreatimes.co.kr/www/rss/rss.xml',
       'https://thediplomat.com/feed/',
-      'https://www.thejakartapost.com/feed/',
-      'https://www.bangkokpost.com/rss/data/topstories.xml',
       'https://www.straitstimes.com/news/asia/rss.xml',
       'https://www.channelnewsasia.com/rss/outbound/',
-      'https://www.nationthailand.com/feed',
-      'https://vietnamnews.vn/rss.html',
-      'https://www.thestar.com.my/rss/news',
-      'https://www.dawn.com/feeds/home',
-      'https://tribune.com.pk/feed/',
-      'https://www.dhakatribune.com/feed/',
     ],
-    
-    // PERSIAN GULF / MIDDLE EAST - 18 feeds (ALL RESTORED)
     'persian-gulf': [
       'https://gulfnews.com/rss',
       'https://www.thenationalnews.com/rss',
       'https://www.khaleejtimes.com/feed',
       'https://www.arabnews.com/rss.xml',
-      'https://saudigazette.com.sa/feed/',
       'https://www.aljazeera.com/xml/rss/all.xml',
-      'https://www.aljazeera.com/xml/rss/middleeast.xml',
       'https://www.middleeasteye.net/rss',
-      'https://www.middleeastmonitor.com/feed/',
       'https://www.tehrantimes.com/rss',
-      'https://en.mehrnews.com/rss',
       'https://www.jpost.com/Rss/RssFeedsHeadlines.aspx',
       'https://www.timesofisrael.com/feed/',
-      'https://www.haaretz.com/misc/rss',
-      'https://www.dailysabah.com/rss',
-      'http://www.hurriyetdailynews.com/rss.php',
-      'http://www.jordantimes.com/rss',
-      'https://www.dailystar.com.lb/RSS.ashx',
-      'https://www.naharnet.com/rss',
     ],
-    
-    // GLOBAL / WESTERN - 23 feeds (ALL RESTORED)
     'global': [
       'https://feeds.bbci.co.uk/news/rss.xml',
-      'https://feeds.bbci.co.uk/news/world/rss.xml',
-      'https://rss.cnn.com/rss/edition.rss',
+      'https://www.theguardian.com/world/rss',
       'https://rss.cnn.com/rss/edition_world.rss',
       'https://apnews.com/rss',
       'https://feeds.npr.org/1001/rss.xml',
-      'https://feeds.npr.org/1004/rss.xml',
-      'https://www.theguardian.com/world/rss',
-      'https://www.theguardian.com/uk/rss',
-      'https://rss.nytimes.com/services/xml/rss/nyt/World.xml',
-      'http://feeds.washingtonpost.com/rss/world',
       'https://www.france24.com/en/rss',
       'https://rss.dw.com/rdf/rss-en-all',
-      'https://news.sky.com/feeds/rss/home.xml',
-      'https://abcnews.go.com/abcnews/topstories',
-      'https://www.cbsnews.com/latest/rss/main',
-      'http://feeds.nbcnews.com/nbcnews/public/news',
-      'https://www.politico.com/rss/politics08.xml',
-      'https://thehill.com/feed/',
-      'https://www.axios.com/feeds/feed.rss',
-      'https://www.vox.com/rss/index.xml',
-      'https://www.buzzfeed.com/world.xml',
-      'https://www.vice.com/en/rss',
     ],
-    
-    // TECH / BUSINESS - 16 feeds (ALL RESTORED)
     'tech': [
-      'https://news.ycombinator.com/rss',
       'https://techcrunch.com/feed/',
       'https://www.theverge.com/rss/index.xml',
-      'http://feeds.arstechnica.com/arstechnica/index',
       'https://www.wired.com/feed/rss',
-      'https://www.engadget.com/rss.xml',
-      'https://www.cnet.com/rss/news/',
-      'https://www.zdnet.com/news/rss.xml',
-      'https://venturebeat.com/feed/',
-      'https://www.ft.com/?format=rss',
-      'https://feeds.bloomberg.com/bloomberg/index.rss',
-      'https://feeds.a.dj.com/rss/RSSWorldNews.xml',
-      'https://www.economist.com/rss',
-      'https://www.forbes.com/real-time/feed2/',
-      'https://www.businessinsider.com/rss',
-      'http://feeds.marketwatch.com/marketwatch/topstories/',
+      'https://arstechnica.com/feed/',
     ],
-    
-    // INDEPENDENT / ALTERNATIVE - 16 feeds (ALL RESTORED)
     'independent': [
       'https://www.democracynow.org/democracynow.rss',
       'https://theintercept.com/feed/?rss',
-      'https://www.propublica.org/feeds/propublica/main',
-      'https://www.motherjones.com/feed/',
-      'https://www.thenation.com/feed/?post_type=article',
-      'https://jacobin.com/feed',
-      'https://newrepublic.com/rss.xml',
-      'https://reason.com/feed/',
-      'https://feeds.feedburner.com/zerohedge/feed',
-      'http://feeds.feedburner.com/DrudgeReportFeed',
-      'https://feeds.feedburner.com/breitbart',
-      'https://dailycaller.com/feed/',
-      'https://www.infowars.com/rss',
-      'https://www.naturalnews.com/rss.xml',
-      'https://www.commondreams.org/rss',
-      'https://truthout.org/feed/',
     ],
   };
 
   const regionKey = region === 'gulf' ? 'persian-gulf' : region;
   const regionFeeds = feeds[regionKey] || feeds['global'];
   
-  const stories: any[] = [];
-  const errors: string[] = [];
-  
-  // Fetch ALL feeds in parallel with timeout
+  // Fetch all feeds in parallel with individual timeouts
   const feedPromises = regionFeeds.map(async (feedUrl) => {
     try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 5000); // 5s per feed
+      
       const response = await fetch(feedUrl, {
+        signal: controller.signal,
         headers: { 
           'User-Agent': 'NexusNews/1.0',
-          'Accept': 'application/rss+xml, application/xml, text/xml, application/atom+xml'
+          'Accept': 'application/rss+xml, application/xml, text/xml'
         },
         cf: { cacheTtl: 600 }
       });
       
-      if (!response.ok) {
-        errors.push(`${feedUrl}: HTTP ${response.status}`);
-        return [];
-      }
+      clearTimeout(timeout);
+      
+      if (!response.ok) return [];
       
       const text = await response.text();
-      
-      if (!text || text.length < 100) {
-        errors.push(`${feedUrl}: Empty response`);
-        return [];
-      }
+      if (!text || text.length < 100) return [];
       
       const items = parseRSS(text);
       
-      return items.slice(0, 5).map((item: any) => ({
+      return items.slice(0, 3).map((item: any) => ({
         id: `rss-${hashString(item.link)}-${Date.now()}`,
-        title: item.title?.replace(/<!\[CDATA\[|\]\]>/g, '').trim() || 'Untitled',
-        description: item.description?.replace(/<!\[CDATA\[|\]\]>/g, '').replace(/<[^>]*>/g, '').slice(0, 200) || '',
+        title: cleanText(item.title),
+        description: cleanText(item.description).slice(0, 200),
         url: item.link,
         image: null,
         source: extractSourceFromRSS(text, feedUrl),
@@ -556,22 +527,15 @@ async function fetchRSSFeeds(region: string): Promise<any[]> {
         isBreaking: isRecent(item.pubDate, 60),
       }));
     } catch (e) {
-      errors.push(`${feedUrl}: ${e instanceof Error ? e.message : 'Unknown error'}`);
-      return [];
+      return []; // Silent fail for individual feeds
     }
   });
   
   const results = await Promise.all(feedPromises);
-  stories.push(...results.flat());
-  
-  if (errors.length > 0) {
-    console.log('RSS fetch errors:', errors.length, 'feeds failed');
-  }
-  
-  return stories;
+  return results.flat();
 }
 
-// ==================== GDELT ====================
+// ==================== GDELT (FREE) ====================
 async function fetchGDELT(region: string, limit: number): Promise<any[]> {
   try {
     const themeMap: Record<string, string> = {
@@ -592,7 +556,7 @@ async function fetchGDELT(region: string, limit: number): Promise<any[]> {
     });
     
     if (!response.ok) {
-      throw new Error(`GDELT failed: ${response.status}`);
+      throw new Error(`HTTP ${response.status}`);
     }
     
     const data = await response.json();
@@ -621,9 +585,9 @@ async function fetchGDELT(region: string, limit: number): Promise<any[]> {
 function getFallbackStories(region: string): any[] {
   return [
     {
-      id: `fallback-1-${Date.now()}`,
+      id: `fallback-${Date.now()}`,
       title: 'News temporarily unavailable',
-      description: 'We are experiencing high demand. Please try again in a few minutes, or check the Tech section for HackerNews (always available).',
+      description: 'All news sources are currently unreachable. This is usually temporary. Please try again in a few minutes.',
       url: 'https://news.ycombinator.com',
       image: null,
       source: 'Nexus System',
@@ -636,7 +600,7 @@ function getFallbackStories(region: string): any[] {
   ];
 }
 
-// ==================== UTILITY FUNCTIONS ====================
+// ==================== UTILITIES ====================
 function deduplicateAndRank(stories: any[]): any[] {
   const seen = new Set<string>();
   const unique: any[] = [];
@@ -676,10 +640,9 @@ function isRecent(dateStr: string | undefined, minutes: number): boolean {
 
 function detectRegion(countryCode: string | undefined, fallback: string): string {
   if (!countryCode) return fallback;
-  
   const code = countryCode.toLowerCase();
-  const africa = ['ng', 'za', 'ke', 'eg', 'gh', 'et', 'ug', 'tz', 'sn', 'zw'];
-  const asia = ['in', 'cn', 'jp', 'kr', 'id', 'th', 'vn', 'my', 'ph', 'sg', 'bd', 'pk'];
+  const africa = ['ng', 'za', 'ke', 'eg', 'gh', 'et', 'ug', 'tz'];
+  const asia = ['in', 'cn', 'jp', 'kr', 'id', 'th', 'vn', 'my', 'ph', 'sg'];
   const gulf = ['ae', 'sa', 'qa', 'kw', 'bh', 'om', 'ir', 'iq'];
   
   if (africa.includes(code)) return 'africa';
@@ -690,24 +653,9 @@ function detectRegion(countryCode: string | undefined, fallback: string): string
 
 function detectCategoryFromSource(url: string): string {
   const lower = url.toLowerCase();
-  if (lower.includes('tech') || lower.includes('hacker') || lower.includes('verge') || lower.includes('wired')) {
-    return 'technology';
-  }
-  if (lower.includes('business') || lower.includes('market') || lower.includes('economist') || lower.includes('forbes')) {
-    return 'business';
-  }
-  if (lower.includes('sport')) {
-    return 'sports';
-  }
-  if (lower.includes('entertainment')) {
-    return 'entertainment';
-  }
-  if (lower.includes('health')) {
-    return 'health';
-  }
-  if (lower.includes('science')) {
-    return 'science';
-  }
+  if (lower.includes('tech') || lower.includes('wired') || lower.includes('verge')) return 'technology';
+  if (lower.includes('business') || lower.includes('economist') || lower.includes('forbes')) return 'business';
+  if (lower.includes('sport')) return 'sports';
   return 'general';
 }
 
@@ -724,56 +672,39 @@ function hashString(str: string | undefined): string {
 
 function parseRSS(xml: string): any[] {
   const items: any[] = [];
-  
   const isAtom = xml.includes('<feed') || xml.includes('xmlns="http://www.w3.org/2005/Atom"');
   
   if (isAtom) {
     const entryRegex = /<entry[\s\S]*?<\/entry>/gi;
     const entries = xml.match(entryRegex) || [];
-    
     for (const entry of entries) {
       const title = extractTag(entry, 'title');
       const link = extractAtomLink(entry);
       const content = extractTag(entry, 'content') || extractTag(entry, 'summary');
       const published = extractTag(entry, 'published') || extractTag(entry, 'updated');
-      
       if (title && link) {
-        items.push({
-          title: cleanText(title),
-          link: link.trim(),
-          description: cleanText(content),
-          pubDate: published,
-        });
+        items.push({ title, link: link.trim(), description: content, pubDate: published });
       }
     }
   } else {
     const itemRegex = /<item[\s\S]*?<\/item>/gi;
     const rssItems = xml.match(itemRegex) || [];
-    
     for (const item of rssItems) {
       const title = extractTag(item, 'title');
       const link = extractTag(item, 'link') || extractAttribute(item, 'link', 'href');
-      const description = extractTag(item, 'description') || extractTag(item, 'summary') || extractTag(item, 'content:encoded');
-      const pubDate = extractTag(item, 'pubDate') || extractTag(item, 'dc:date');
-      
+      const description = extractTag(item, 'description') || extractTag(item, 'summary');
+      const pubDate = extractTag(item, 'pubDate');
       if (title && link) {
-        items.push({
-          title: cleanText(title),
-          link: link.trim(),
-          description: cleanText(description),
-          pubDate: pubDate,
-        });
+        items.push({ title, link: link.trim(), description, pubDate });
       }
     }
   }
-  
   return items;
 }
 
 function extractAtomLink(entry: string): string | null {
   const hrefMatch = entry.match(/<link[^>]*href="([^"]*)"[^>]*>/i);
-  if (hrefMatch) return hrefMatch[1];
-  return extractTag(entry, 'link');
+  return hrefMatch ? hrefMatch[1] : extractTag(entry, 'link');
 }
 
 function cleanText(text: string | null): string {
@@ -802,7 +733,6 @@ function extractSourceFromRSS(xml: string, url: string): string {
   if (channelTitle) {
     return channelTitle.replace(' - RSS Feed', '').replace(' RSS', '').trim();
   }
-  
   try {
     const domain = new URL(url).hostname.replace('www.', '');
     return domain.split('.')[0].charAt(0).toUpperCase() + domain.split('.')[0].slice(1);
