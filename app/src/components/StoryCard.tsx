@@ -18,12 +18,12 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from '@/components/ui/tooltip';
-import type { NewsStory, NewsItem } from '@/types/news';
+import type { NewsItem } from '@/types/news';
 import { SOURCE_BIAS } from '@/types/news';
 
 interface StoryCardProps {
-  story: NewsItem;
-  article?: NewsItem; // Alias for backward compatibility
+  story?: NewsItem;
+  article?: NewsItem;
   variant?: 'featured' | 'standard' | 'compact';
   index?: number;
 }

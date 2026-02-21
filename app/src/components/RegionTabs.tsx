@@ -30,7 +30,7 @@ export function RegionTabs({ activeRegion, onRegionChange }: RegionTabsProps) {
   return (
     <div className="w-full overflow-x-auto">
       <div className="flex gap-2 p-1 min-w-max">
-        {REGIONS.map((region) => (
+        {REGIONS.map((region: RegionConfig) => (
           <button
             key={region.id}
             onClick={() => onRegionChange(region.id)}

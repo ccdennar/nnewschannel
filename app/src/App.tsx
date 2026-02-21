@@ -7,7 +7,7 @@ import { SourcesPanel } from '@/components/SourcesPanel';
 import { Footer } from '@/components/Footer';
 import { BottomNav } from '@/components/BottomNav';
 import { useNews } from '@/hooks/useNews';
-import type { Region, RegionType } from '@/types/news';
+import type { RegionType } from '@/types/news';
 import { Toaster } from '@/components/ui/sonner';
 import { toast } from 'sonner';
 import { Info, X, AlertTriangle } from 'lucide-react';
@@ -16,15 +16,13 @@ import { Button } from '@/components/ui/button';
 import './App.css';
 
 function App() {
-  // Support both region type systems
   const [activeRegion, setActiveRegion] = useState<RegionType>('all');
-  const [region, setRegion] = useState<Region>('global');
   const [activeTab, setActiveTab] = useState('home');
   const [showBanner, setShowBanner] = useState(true);
   
   const { 
     articles, 
-    stories, // Alias for compatibility
+    stories,
     loading, 
     error, 
     lastUpdated,
@@ -34,27 +32,12 @@ function App() {
     refresh 
   } = useNews(activeRegion);
 
-  // Sync region types
-  useEffect(() => {
-    const map: Record<RegionType, Region> = {
-      'all': 'global',
-      'global': 'global',
-      'africa': 'africa',
-      'asia': 'asia',
-      'persian-gulf': 'persian-gulf',
-      'tech': 'tech',
-      'independent': 'independent'
-    };
-    setRegion(map[activeRegion] || 'global');
-  }, [activeRegion]);
-
   // Show toast when region changes
   useEffect(() => {
-    if (!loading && (articles?.length > 0 || stories?.length > 0)) {
-      const count = articles?.length || stories?.length || 0;
-      toast.success(`Loaded ${count} articles from ${activeRegion.replace('-', ' ')}`);
+    if (!loading && articles.length > 0) {
+      toast.success(`Loaded ${articles.length} articles from ${activeRegion.replace('-', ' ')}`);
     }
-  }, [activeRegion, articles, stories, loading]);
+  }, [activeRegion, articles.length, loading]);
 
   // Show error toast
   useEffect(() => {
@@ -70,7 +53,6 @@ function App() {
 
   const handleSearch = (query: string) => {
     console.log('Search:', query);
-    // Implement search functionality
   };
 
   // Use articles or stories (backward compatibility)
@@ -86,8 +68,8 @@ function App() {
         isRefreshing={loading}
         lastUpdated={lastUpdated}
         articleCount={displayStories.length}
-        currentRegion={region}
-        onRegionChange={(r) => handleRegionChange(r as RegionType)}
+        currentRegion={activeRegion}
+        onRegionChange={handleRegionChange}
         onSearch={handleSearch}
       />
 
@@ -141,14 +123,14 @@ function App() {
           stories={displayStories}
           loading={loading}
           error={error}
-          hasMore={hasMore || false}
-          onLoadMore={loadMore || (() => {})}
+          hasMore={hasMore}
+          onLoadMore={loadMore}
           onRefresh={refresh}
-          region={region}
+          region={activeRegion}
         />
 
-        {/* Fallback to NewsGrid if NewsFeed not available */}
-        {!stories && (
+        {/* Fallback to NewsGrid if needed */}
+        {articles.length === 0 && !loading && (
           <NewsGrid 
             articles={articles}
             loading={loading}

@@ -1,16 +1,14 @@
-// app/src/types/news.ts
-
 export interface NewsItem {
   id: string;
   title: string;
   description: string;
   url: string;
   imageUrl?: string;
-  image?: string; // Alias for backward compatibility
+  image?: string;
   publishedAt: string;
   source: string;
   sourceRegion?: string;
-  region?: string; // Alias for backward compatibility
+  region?: string;
   language?: string;
   author?: string;
   category?: string;
@@ -20,10 +18,10 @@ export interface NewsItem {
   isBreaking?: boolean;
 }
 
-// Alias for backward compatibility
 export type NewsStory = NewsItem;
 
 export type RegionType = 'africa' | 'asia' | 'persian-gulf' | 'global' | 'independent' | 'tech' | 'all';
+export type Region = RegionType;
 
 export interface NewsResponse {
   region?: string;
@@ -93,3 +91,56 @@ export const SOURCE_BIAS: Record<string, SourceBias> = {
     description: 'Alternative health/natural news'
   }
 };
+
+export interface RegionConfig {
+  id: RegionType;
+  name: string;
+  description: string;
+  icon: string;
+  color: string;
+}
+
+export const REGIONS: RegionConfig[] = [
+  {
+    id: 'all',
+    name: 'All News',
+    description: 'Global coverage',
+    icon: 'globe',
+    color: 'bg-blue-500'
+  },
+  {
+    id: 'africa',
+    name: 'Africa',
+    description: 'African news',
+    icon: 'map-pin',
+    color: 'bg-emerald-500'
+  },
+  {
+    id: 'asia',
+    name: 'Asia',
+    description: 'Asian coverage',
+    icon: 'building',
+    color: 'bg-rose-500'
+  },
+  {
+    id: 'persian-gulf',
+    name: 'Persian Gulf',
+    description: 'Middle East news',
+    icon: 'map-pin',
+    color: 'bg-amber-500'
+  },
+  {
+    id: 'tech',
+    name: 'Tech',
+    description: 'Technology news',
+    icon: 'laptop',
+    color: 'bg-violet-500'
+  },
+  {
+    id: 'independent',
+    name: 'Independent',
+    description: 'Alternative sources',
+    icon: 'megaphone',
+    color: 'bg-purple-500'
+  }
+];

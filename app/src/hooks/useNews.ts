@@ -6,10 +6,13 @@ const REFRESH_INTERVAL = 5 * 60 * 1000; // 5 minutes
 
 interface UseNewsReturn {
   articles: NewsItem[];
+  stories: NewsItem[]; // Alias for backward compatibility
   loading: boolean;
   error: string | null;
   lastUpdated: Date | null;
   activeSources: string[];
+  hasMore: boolean;
+  loadMore: () => void;
   refresh: () => void;
 }
 
@@ -19,6 +22,7 @@ export function useNews(region: RegionType): UseNewsReturn {
   const [error, setError] = useState<string | null>(null);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const [activeSources, setActiveSources] = useState<string[]>([]);
+  const [hasMore, setHasMore] = useState(false);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const fetchNews = useCallback(async () => {
@@ -26,18 +30,11 @@ export function useNews(region: RegionType): UseNewsReturn {
     setError(null);
 
     try {
-      // Handle independent region specially
-      if (region === 'independent') {
-        const response = await newsService.fetchByRegion('independent');
-        setArticles(response.articles);
-        setActiveSources(response.sources || []);
-        setLastUpdated(new Date(response.timestamp));
-      } else {
-        const response = await newsService.fetchByRegion(region);
-        setArticles(response.articles);
-        setActiveSources(response.sources || []);
-        setLastUpdated(new Date(response.timestamp));
-      }
+      const response = await newsService.fetchByRegion(region);
+      setArticles(response.articles || []);
+      setActiveSources(response.sources || []);
+      setLastUpdated(new Date(response.timestamp || Date.now()));
+      setHasMore(false); // Pagination not implemented yet
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to fetch news');
       setArticles([]);
@@ -49,6 +46,11 @@ export function useNews(region: RegionType): UseNewsReturn {
   const refresh = useCallback(() => {
     fetchNews();
   }, [fetchNews]);
+
+  const loadMore = useCallback(() => {
+    // Pagination not implemented yet
+    console.log('Load more clicked');
+  }, []);
 
   useEffect(() => {
     fetchNews();
@@ -64,10 +66,13 @@ export function useNews(region: RegionType): UseNewsReturn {
 
   return {
     articles,
+    stories: articles, // Alias for backward compatibility
     loading,
     error,
     lastUpdated,
     activeSources,
+    hasMore,
+    loadMore,
     refresh
   };
 }
@@ -78,6 +83,7 @@ export function useAllNews(): UseNewsReturn {
   const [error, setError] = useState<string | null>(null);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const [activeSources, setActiveSources] = useState<string[]>([]);
+  const [hasMore, setHasMore] = useState(false);
 
   const fetchAllNews = useCallback(async () => {
     setLoading(true);
@@ -85,9 +91,10 @@ export function useAllNews(): UseNewsReturn {
 
     try {
       const response = await newsService.fetchAll();
-      setArticles(response.articles);
+      setArticles(response.articles || []);
       setActiveSources(response.sources || []);
-      setLastUpdated(new Date(response.timestamp));
+      setLastUpdated(new Date(response.timestamp || Date.now()));
+      setHasMore(false);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to fetch news');
     } finally {
@@ -101,12 +108,19 @@ export function useAllNews(): UseNewsReturn {
     return () => clearInterval(interval);
   }, [fetchAllNews]);
 
+  const loadMore = useCallback(() => {
+    console.log('Load more clicked');
+  }, []);
+
   return {
     articles,
+    stories: articles,
     loading,
     error,
     lastUpdated,
     activeSources,
+    hasMore,
+    loadMore,
     refresh: fetchAllNews
   };
 }
