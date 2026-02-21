@@ -115,7 +115,7 @@ function getSourceColor(source: string): string {
 }
 
 // Your region badge logic
-function getRegionBadge(region: string): { label: string; color: string } {
+function getRegionBadge(region?: string): { label: string; color: string } {
   switch (region) {
     case 'africa':
       return { label: 'Africa', color: 'bg-emerald-500/10 text-emerald-600 border-emerald-200' };
@@ -136,11 +136,17 @@ function getRegionBadge(region: string): { label: string; color: string } {
 }
 
 export function StoryCard({ story, article, variant = 'standard', index = 0 }: StoryCardProps) {
-  const item = story || article; // Support both prop names
+  const item = story || article;
+  
+  // Return null if no item provided
+  if (!item) {
+    return null;
+  }
+  
   const [isSaved, setIsSaved] = useState(false);
   const [imageError, setImageError] = useState(false);
   
-  const regionBadge = getRegionBadge(item.region || item.sourceRegion || 'global');
+  const regionBadge = getRegionBadge(item.region || item.sourceRegion);
   const sourceClass = getSourceColor(item.source);
   const biasInfo = item.bias ? SOURCE_BIAS[item.bias] : null;
   
@@ -187,7 +193,7 @@ export function StoryCard({ story, article, variant = 'standard', index = 0 }: S
           
           {/* Badges on image */}
           <div className="absolute top-4 left-4 flex gap-2 flex-wrap">
-            {(item as NewsStory).isBreaking && (
+            {item.isBreaking && (
               <Badge className="bg-red-500 text-white animate-pulse border-0">
                 🔴 BREAKING
               </Badge>
@@ -225,7 +231,7 @@ export function StoryCard({ story, article, variant = 'standard', index = 0 }: S
     );
   }
 
-  // Standard card (merged both designs)
+  // Standard card
   return (
     <Card 
       className="overflow-hidden group hover:shadow-lg transition-all duration-300 border-border/60 hover:border-primary/30"
@@ -252,7 +258,7 @@ export function StoryCard({ story, article, variant = 'standard', index = 0 }: S
         
         {/* Badges */}
         <div className="absolute top-3 left-3 flex flex-col gap-2">
-          {(item as NewsStory).isBreaking && (
+          {item.isBreaking && (
             <Badge className="bg-red-500 text-white text-xs animate-pulse border-0">
               BREAKING
             </Badge>
@@ -263,7 +269,7 @@ export function StoryCard({ story, article, variant = 'standard', index = 0 }: S
           </Badge>
         </div>
 
-        {/* Bias badge (if no image, shown in content instead) */}
+        {/* Bias badge */}
         {biasInfo && imageUrl && (
           <div className="absolute top-3 right-3">
             <Badge className={`${biasInfo.color} text-white text-xs border-0 flex items-center gap-1`}>
