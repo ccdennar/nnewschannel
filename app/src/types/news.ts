@@ -1,32 +1,45 @@
-export interface NewsItem {
+export interface NewsStory {
   id: string;
   title: string;
   description: string;
   url: string;
-  imageUrl?: string;
+  image: string | null;
+  imageUrl?: string; // Alias for backward compatibility
   publishedAt: string;
   source: string;
-  sourceRegion: string;
-  category?: string;
+  sourceRegion?: string; // Alias for backward compatibility
+  region: Region | string;
+  category: string;
+  apiSource: string;
   language?: string;
   author?: string;
-  bias?: string; // For labeling source bias/perspective
+  bias?: string;
+  isBreaking: boolean;
+  isTrending?: boolean;
+  sentiment?: 'positive' | 'negative' | 'neutral';
 }
 
 export interface NewsResponse {
-  region?: string;
-  articles: NewsItem[];
-  sources?: string[];
-  timestamp: string;
-  totalArticles?: number;
-  regions?: Array<{ region: string; sources: string[] }>;
+  stories: NewsStory[];
+  articles?: NewsStory[]; // Alias for backward compatibility
+  region?: Region | string;
   category?: string;
+  sources?: string[];
+  regions?: Array<{ region: string; sources: string[] }>;
+  totalArticles?: number;
+  meta: {
+    region: string;
+    page: number;
+    total: number;
+    fetchedAt: string;
+  };
+  timestamp?: string; // Alias for backward compatibility
 }
 
-export type RegionType = 'all' | 'africa' | 'asia' | 'persian-gulf' | 'global' | 'tech' | 'independent';
+export type Region = 'all' | 'global' | 'africa' | 'asia' | 'persian-gulf' | 'tech' | 'independent';
 
 export interface RegionConfig {
-  id: RegionType;
+  id: Region;
   name: string;
   description: string;
   color: string;
@@ -62,10 +75,10 @@ export const REGIONS: RegionConfig[] = [
   {
     id: 'persian-gulf',
     name: 'Persian Gulf',
-    description: 'Israel, Iran, GCC states',
+    description: 'GCC states, Iran, Iraq',
     color: 'bg-amber-600',
     icon: 'building',
-    countries: ['AE', 'SA', 'QA', 'KW', 'BH', 'OM', 'IR', 'IQ', 'IL', 'JO', 'LB']
+    countries: ['AE', 'SA', 'QA', 'KW', 'BH', 'OM', 'IR', 'IQ', 'JO', 'LB']
   },
   {
     id: 'global',
@@ -73,15 +86,7 @@ export const REGIONS: RegionConfig[] = [
     description: 'Worldwide coverage',
     color: 'bg-blue-600',
     icon: 'globe',
-    countries: ['US', 'GB', 'CA', 'AU', 'DE', 'FR', 'ES', 'IT']
-  },
-  {
-    id: 'independent',
-    name: 'Independent',
-    description: 'Alternative & indie sources',
-    color: 'bg-purple-600',
-    icon: 'megaphone',
-    countries: []
+    countries: ['US', 'GB', 'CA', 'AU', 'DE', 'FR']
   },
   {
     id: 'tech',
@@ -89,6 +94,14 @@ export const REGIONS: RegionConfig[] = [
     description: 'Tech news from HN & more',
     color: 'bg-violet-600',
     icon: 'laptop',
+    countries: []
+  },
+  {
+    id: 'independent',
+    name: 'Independent',
+    description: 'Alternative & indie sources',
+    color: 'bg-purple-600',
+    icon: 'megaphone',
     countries: []
   }
 ];
@@ -106,3 +119,26 @@ export const SOURCE_BIAS: Record<string, { label: string; color: string }> = {
   'independent-conspiracy': { label: 'Conspiracy', color: 'bg-red-500' },
   'independent-health': { label: 'Health Alt', color: 'bg-teal-500' }
 };
+
+// Helper to normalize region IDs
+export function normalizeRegion(region: string): Region {
+  const map: Record<string, Region> = {
+    'africa': 'africa',
+    'asia': 'asia',
+    'gulf': 'persian-gulf',
+    'persian-gulf': 'persian-gulf',
+    'middle-east': 'persian-gulf',
+    'global': 'global',
+    'world': 'global',
+    'all': 'all',
+    'tech': 'tech',
+    'technology': 'tech',
+    'independent': 'independent'
+  };
+  return map[region.toLowerCase()] || 'global';
+}
+
+// Helper to get region config
+export function getRegionConfig(region: Region): RegionConfig {
+  return REGIONS.find(r => r.id === region) || REGIONS[1]; // Default to Africa
+}

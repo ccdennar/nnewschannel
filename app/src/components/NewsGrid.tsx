@@ -1,5 +1,5 @@
 import type { NewsItem } from '@/types/news';
-import { NewsCard } from './NewsCard';
+import { StoryCard } from '@/components/StoryCard';
 import { Skeleton } from '@/components/ui/skeleton';
 import { AlertCircle, Newspaper, RefreshCw } from 'lucide-react';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
@@ -86,9 +86,9 @@ export function NewsGrid({ articles, loading, error, onRetry }: NewsGridProps) {
   return (
     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
       {articles.map((article, index) => (
-        <NewsCard 
+        <StoryCard 
           key={article.id} 
-          article={article} 
+          story={article} 
           index={index}
         />
       ))}

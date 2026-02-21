@@ -1,43 +1,47 @@
-import type { NewsItem } from '@/types/news';
-import { Card } from '@/components/ui/card';
-import { Badge } from '@/components/ui/badge';
+import { useState } from 'react';
 import { 
+  Share2, 
+  Bookmark, 
   ExternalLink, 
   Clock, 
   User, 
   Globe,
   Newspaper,
-  Share2,
-  Bookmark,
   AlertTriangle
 } from 'lucide-react';
+import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
-import { useState } from 'react';
+import { Badge } from '@/components/ui/badge';
 import {
   Tooltip,
   TooltipContent,
   TooltipProvider,
   TooltipTrigger,
 } from '@/components/ui/tooltip';
+import type { NewsStory, NewsItem } from '@/types/news';
 import { SOURCE_BIAS } from '@/types/news';
 
-interface NewsCardProps {
-  article: NewsItem;
+// Support both type naming conventions
+type Story = NewsStory | NewsItem;
+
+interface StoryCardProps {
+  story: Story;
+  article?: Story; // Alias for backward compatibility
+  variant?: 'featured' | 'standard' | 'compact';
   index?: number;
 }
 
-function timeAgo(dateString: string): string {
-  const date = new Date(dateString);
-  const now = new Date();
-  const seconds = Math.floor((now.getTime() - date.getTime()) / 1000);
-  
+// Unified time formatter
+function timeAgo(date: string): string {
+  const seconds = Math.floor((Date.now() - new Date(date).getTime()) / 1000);
   if (seconds < 60) return 'Just now';
   if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
   if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
   if (seconds < 604800) return `${Math.floor(seconds / 86400)}d ago`;
-  return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  return new Date(date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 }
 
+// Your source color logic
 function getSourceColor(source: string): string {
   const sourceLower = source.toLowerCase();
   if (sourceLower.includes('hackernews') || sourceLower.includes('hn')) {
@@ -47,7 +51,7 @@ function getSourceColor(source: string): string {
     return 'bg-red-500/10 text-red-600 border-red-200';
   }
   if (sourceLower.includes('al jazeera') || sourceLower.includes('aljazeera')) {
-  return 'bg-orange-500/10 text-orange-600 border-orange-200';
+    return 'bg-orange-500/10 text-orange-600 border-orange-200';
   }
   if (sourceLower.includes('xinhua')) {
     return 'bg-red-600/10 text-red-700 border-red-300';
@@ -113,6 +117,7 @@ function getSourceColor(source: string): string {
   return 'bg-muted text-muted-foreground border-border';
 }
 
+// Your region badge logic
 function getRegionBadge(region: string): { label: string; color: string } {
   switch (region) {
     case 'africa':
@@ -120,88 +125,168 @@ function getRegionBadge(region: string): { label: string; color: string } {
     case 'asia':
       return { label: 'Asia', color: 'bg-rose-500/10 text-rose-600 border-rose-200' };
     case 'persian-gulf':
+    case 'gulf':
       return { label: 'Persian Gulf', color: 'bg-amber-500/10 text-amber-600 border-amber-200' };
     case 'global':
       return { label: 'Global', color: 'bg-blue-500/10 text-blue-600 border-blue-200' };
     case 'independent':
       return { label: 'Independent', color: 'bg-purple-500/10 text-purple-600 border-purple-200' };
+    case 'tech':
+      return { label: 'Tech', color: 'bg-violet-500/10 text-violet-600 border-violet-200' };
     default:
       return { label: 'Global', color: 'bg-slate-500/10 text-slate-600 border-slate-200' };
   }
 }
 
-export function NewsCard({ article, index = 0 }: NewsCardProps) {
+export function StoryCard({ story, article, variant = 'standard', index = 0 }: StoryCardProps) {
+  const item = story || article; // Support both prop names
+  const [isSaved, setIsSaved] = useState(false);
   const [imageError, setImageError] = useState(false);
-  const [isBookmarked, setIsBookmarked] = useState(false);
   
-  const regionBadge = getRegionBadge(article.sourceRegion);
-  const sourceClass = getSourceColor(article.source);
-  const biasInfo = article.bias ? SOURCE_BIAS[article.bias] : null;
+  const regionBadge = getRegionBadge(item.region || item.sourceRegion || 'global');
+  const sourceClass = getSourceColor(item.source);
+  const biasInfo = item.bias ? SOURCE_BIAS[item.bias] : null;
   
   const handleShare = async () => {
     if (navigator.share) {
       try {
         await navigator.share({
-          title: article.title,
-          url: article.url
+          title: item.title,
+          url: item.url,
         });
       } catch {
         // User cancelled
       }
     } else {
-      navigator.clipboard.writeText(article.url);
+      navigator.clipboard.writeText(item.url);
     }
   };
 
-  return (
-    <Card 
-      className="group overflow-hidden hover:shadow-lg transition-all duration-300 border-border/60 hover:border-primary/30"
-      style={{ animationDelay: `${index * 50}ms` }}
-    >
-      {/* Image */}
-      {article.imageUrl && !imageError && (
-        <div className="relative h-48 overflow-hidden bg-muted">
-          <img
-            src={article.imageUrl}
-            alt={article.title}
-            className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-105"
-            onError={() => setImageError(true)}
-            loading="lazy"
-          />
-          <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent" />
+  // Get image URL (support both naming conventions)
+  const imageUrl = item.image || item.imageUrl;
+
+  // Featured variant (hero style)
+  if (variant === 'featured') {
+    return (
+      <Card 
+        className="relative overflow-hidden group cursor-pointer border-0 shadow-lg"
+        style={{ animationDelay: `${index * 50}ms` }}
+      >
+        <div className="relative h-64 sm:h-80 md:h-96">
+          {!imageError && imageUrl ? (
+            <img
+              src={imageUrl}
+              alt={item.title}
+              className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-105"
+              onError={() => setImageError(true)}
+              loading="lazy"
+            />
+          ) : (
+            <div className="w-full h-full bg-gradient-to-br from-primary/20 to-primary/40 flex items-center justify-center">
+              <span className="text-6xl">📰</span>
+            </div>
+          )}
+          <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/20 to-transparent" />
           
-          {/* Floating badges on image */}
-          <div className="absolute top-3 left-3 flex gap-2 flex-wrap">
-            <Badge variant="secondary" className={`${regionBadge.color} text-xs font-medium backdrop-blur-sm`}>
-              <Globe className="w-3 h-3 mr-1" />
-              {regionBadge.label}
-            </Badge>
-            {article.category && (
-              <Badge variant="secondary" className="bg-black/50 text-white text-xs backdrop-blur-sm">
-                {article.category}
+          {/* Badges on image */}
+          <div className="absolute top-4 left-4 flex gap-2 flex-wrap">
+            {(item as NewsStory).isBreaking && (
+              <Badge className="bg-red-500 text-white animate-pulse border-0">
+                🔴 BREAKING
               </Badge>
             )}
-            {/* Bias label */}
+            <Badge variant="secondary" className="bg-black/50 text-white border-0">
+              {regionBadge.label}
+            </Badge>
             {biasInfo && (
-              <Badge variant="secondary" className={`${biasInfo.color} text-white text-xs backdrop-blur-sm flex items-center gap-1`}>
+              <Badge className={`${biasInfo.color} text-white border-0 flex items-center gap-1`}>
                 <AlertTriangle className="w-3 h-3" />
                 {biasInfo.label}
               </Badge>
             )}
           </div>
-        </div>
-      )}
 
-      <div className="p-4">
-        {/* Source & Time */}
+          {/* Content overlay */}
+          <div className="absolute bottom-0 left-0 right-0 p-4 sm:p-6 text-white">
+            <div className="flex items-center gap-2 text-sm text-white/80 mb-2">
+              <span className="font-semibold">{item.source}</span>
+              <span>•</span>
+              <span className="flex items-center gap-1">
+                <Clock className="w-3 h-3" />
+                {timeAgo(item.publishedAt)}
+              </span>
+            </div>
+            <h2 className="text-xl sm:text-2xl md:text-3xl font-bold leading-tight mb-2">
+              {item.title}
+            </h2>
+            <p className="text-white/80 text-sm sm:text-base line-clamp-2 hidden sm:block">
+              {item.description}
+            </p>
+          </div>
+        </div>
+      </Card>
+    );
+  }
+
+  // Standard card (merged both designs)
+  return (
+    <Card 
+      className="overflow-hidden group hover:shadow-lg transition-all duration-300 border-border/60 hover:border-primary/30"
+      style={{ animationDelay: `${index * 50}ms` }}
+    >
+      {/* Image Section */}
+      <div className="relative h-48 sm:h-56">
+        {!imageError && imageUrl ? (
+          <img
+            src={imageUrl}
+            alt={item.title}
+            className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
+            onError={() => setImageError(true)}
+            loading="lazy"
+          />
+        ) : (
+          <div className="w-full h-full bg-muted flex items-center justify-center">
+            <span className="text-4xl">📰</span>
+          </div>
+        )}
+        
+        {/* Gradient overlay */}
+        <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent" />
+        
+        {/* Badges */}
+        <div className="absolute top-3 left-3 flex flex-col gap-2">
+          {(item as NewsStory).isBreaking && (
+            <Badge className="bg-red-500 text-white text-xs animate-pulse border-0">
+              BREAKING
+            </Badge>
+          )}
+          <Badge variant="secondary" className={`${regionBadge.color} text-xs backdrop-blur-sm`}>
+            <Globe className="w-3 h-3 mr-1" />
+            {regionBadge.label}
+          </Badge>
+        </div>
+
+        {/* Bias badge (if no image, shown in content instead) */}
+        {biasInfo && imageUrl && (
+          <div className="absolute top-3 right-3">
+            <Badge className={`${biasInfo.color} text-white text-xs border-0 flex items-center gap-1`}>
+              <AlertTriangle className="w-3 h-3" />
+              {biasInfo.label}
+            </Badge>
+          </div>
+        )}
+      </div>
+
+      <CardContent className="p-4">
+        {/* Source & Meta */}
         <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
           <Badge variant="outline" className={`${sourceClass} text-xs font-medium`}>
             <Newspaper className="w-3 h-3 mr-1" />
-            {article.source}
+            {item.source}
           </Badge>
           
           {/* Bias label (if no image) */}
-          {!article.imageUrl && biasInfo && (
+          {!imageUrl && biasInfo && (
             <Badge variant="outline" className={`${biasInfo.color.replace('bg-', 'text-').replace('600', '600 border-')} text-xs flex items-center gap-1`}>
               <AlertTriangle className="w-3 h-3" />
               {biasInfo.label}
@@ -210,43 +295,44 @@ export function NewsCard({ article, index = 0 }: NewsCardProps) {
           
           <div className="flex items-center gap-1 text-xs text-muted-foreground">
             <Clock className="w-3 h-3" />
-            {timeAgo(article.publishedAt)}
+            {timeAgo(item.publishedAt)}
           </div>
         </div>
 
         {/* Title */}
         <h3 className="font-semibold text-base leading-snug mb-2 line-clamp-2 group-hover:text-primary transition-colors">
           <a 
-            href={article.url} 
+            href={item.url} 
             target="_blank" 
             rel="noopener noreferrer"
             className="hover:underline"
           >
-            {article.title}
+            {item.title}
           </a>
         </h3>
 
         {/* Description */}
         <p className="text-sm text-muted-foreground line-clamp-3 mb-4">
-          {article.description || 'No description available'}
+          {item.description || 'No description available'}
         </p>
 
         {/* Footer */}
         <div className="flex items-center justify-between pt-3 border-t border-border/50">
           <div className="flex items-center gap-3">
-            {article.author && (
+            {item.author && (
               <span className="text-xs text-muted-foreground flex items-center gap-1">
                 <User className="w-3 h-3" />
-                <span className="truncate max-w-[100px]">{article.author}</span>
+                <span className="truncate max-w-[100px]">{item.author}</span>
               </span>
             )}
-            {article.language && article.language !== 'en' && (
+            {item.language && item.language !== 'en' && (
               <Badge variant="outline" className="text-[10px] uppercase">
-                {article.language}
+                {item.language}
               </Badge>
             )}
           </div>
 
+          {/* Actions with tooltips */}
           <div className="flex items-center gap-1">
             <TooltipProvider>
               <Tooltip>
@@ -254,10 +340,10 @@ export function NewsCard({ article, index = 0 }: NewsCardProps) {
                   <Button
                     variant="ghost"
                     size="icon"
-                    className="h-8 w-8"
-                    onClick={() => setIsBookmarked(!isBookmarked)}
+                    className={`h-8 w-8 ${isSaved ? 'text-primary' : ''}`}
+                    onClick={() => setIsSaved(!isSaved)}
                   >
-                    <Bookmark className={`w-4 h-4 ${isBookmarked ? 'fill-primary text-primary' : ''}`} />
+                    <Bookmark className={`h-4 w-4 ${isSaved ? 'fill-current' : ''}`} />
                   </Button>
                 </TooltipTrigger>
                 <TooltipContent>
@@ -275,7 +361,7 @@ export function NewsCard({ article, index = 0 }: NewsCardProps) {
                     className="h-8 w-8"
                     onClick={handleShare}
                   >
-                    <Share2 className="w-4 h-4" />
+                    <Share2 className="h-4 w-4" />
                   </Button>
                 </TooltipTrigger>
                 <TooltipContent>
@@ -293,8 +379,8 @@ export function NewsCard({ article, index = 0 }: NewsCardProps) {
                     className="h-8 w-8"
                     asChild
                   >
-                    <a href={article.url} target="_blank" rel="noopener noreferrer">
-                      <ExternalLink className="w-4 h-4" />
+                    <a href={item.url} target="_blank" rel="noopener noreferrer">
+                      <ExternalLink className="h-4 w-4" />
                     </a>
                   </Button>
                 </TooltipTrigger>
@@ -305,7 +391,10 @@ export function NewsCard({ article, index = 0 }: NewsCardProps) {
             </TooltipProvider>
           </div>
         </div>
-      </div>
+      </CardContent>
     </Card>
   );
 }
+
+// Export alias for backward compatibility
+export { StoryCard as NewsCard };
