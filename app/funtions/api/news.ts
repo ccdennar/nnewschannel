@@ -1,6 +1,8 @@
 import type { PagesFunction } from '@cloudflare/workers-types';
 
 export interface Env {
+  GUARDIAN_API_KEY: string;
+  WORLD_NEWS_API_KEY?: string;
   NEWSDATA_API_KEY: string;
   GNEWS_API_KEY: string;
   CURRENTS_API_KEY?: string;

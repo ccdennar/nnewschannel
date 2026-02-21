@@ -16,7 +16,6 @@ export class NewsAggregator {
     GNEWS_API_KEY?: string;
     CURRENTS_API_KEY?: string;
     WORLD_NEWS_API_KEY?: string;
-    NEWSDATA_API_KEY?: string;
     GUARDIAN_API_KEY?: string; // 'test' works for development
   };
 
