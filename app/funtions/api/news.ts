@@ -26,12 +26,14 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
   const region = url.searchParams.get('region') || 'global';
   const page = parseInt(url.searchParams.get('page') || '1');
   const limit = Math.min(parseInt(url.searchParams.get('limit') || '20'), 50);
+  const debug = url.searchParams.get('debug') === 'true';
 
   const cacheKey = `news:${region}:${page}`;
   
+  // Check cache first
   try {
     const cached = await env.NEXUS_KV.get(cacheKey);
-    if (cached) {
+    if (cached && !debug) {
       return new Response(cached, { 
         headers: { ...corsHeaders, 'Content-Type': 'application/json' }
       });
@@ -40,25 +42,30 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     console.log('Cache miss or error:', e);
   }
 
-  const stories = await fetchAggregatedNews(env, region, limit);
+  const result = await fetchAggregatedNews(env, region, limit, debug);
   
   const response = {
-    stories,
+    stories: result.stories,
     meta: {
       region,
       page,
-      total: stories.length,
+      total: result.stories.length,
       fetchedAt: new Date().toISOString(),
-      sources: [...new Set(stories.map(s => s.apiSource))],
+      sources: result.sourcesUsed,
+      errors: result.errors,
+      debug: debug ? result.debug : undefined,
     }
   };
 
-  try {
-    await env.NEXUS_KV.put(cacheKey, JSON.stringify(response), {
-      expirationTtl: 300
-    });
-  } catch (e) {
-    console.log('Cache write failed:', e);
+  // Cache the response
+  if (!debug) {
+    try {
+      await env.NEXUS_KV.put(cacheKey, JSON.stringify(response), {
+        expirationTtl: 300
+      });
+    } catch (e) {
+      console.log('Cache write failed:', e);
+    }
   }
 
   return new Response(JSON.stringify(response), {
@@ -66,367 +73,389 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
   });
 };
 
-async function fetchAggregatedNews(env: Env, region: string, limit: number) {
-  let stories: any[] = [];
+async function fetchAggregatedNews(env: Env, region: string, limit: number, debug: boolean) {
+  const stories: any[] = [];
   const errors: string[] = [];
   const sourcesUsed: string[] = [];
+  const debugInfo: any = { phases: [] };
 
-  // ========== PHASE 1: FREE/UNLIMITED SOURCES ONLY ==========
+  // ========== PHASE 1: FREE/UNLIMITED SOURCES ==========
   
-  // 1. Guardian API (FREE - unlimited with 'test' key)
+  // 1. Guardian API (FREE)
   try {
-    const guardianStories = await fetchGuardianAPI(env.GUARDIAN_API_KEY || 'test', region, limit);
+    console.log('[Phase 1] Fetching Guardian API...');
+    const guardianStories = await fetchWithTimeout(
+      () => fetchGuardianAPI(env.GUARDIAN_API_KEY || 'test', region, limit),
+      8000,
+      'Guardian API'
+    );
     if (guardianStories.length > 0) {
       stories.push(...guardianStories);
       sourcesUsed.push('guardian');
+      console.log(`[Phase 1] Guardian: ${guardianStories.length} stories`);
     }
   } catch (e) {
-    errors.push(`guardian: ${e instanceof Error ? e.message : 'failed'}`);
+    const msg = `Guardian: ${e instanceof Error ? e.message : 'failed'}`;
+    errors.push(msg);
+    console.error(`[Phase 1] ${msg}`);
   }
 
-  // 2. RSS Feeds (FREE - unlimited)
+  // 2. RSS Feeds (FREE) - Fetch in batches to avoid overwhelming
   try {
+    console.log('[Phase 1] Fetching RSS feeds...');
     const rssStories = await fetchRSSFeeds(region);
     if (rssStories.length > 0) {
       stories.push(...rssStories);
       sourcesUsed.push('rss');
+      console.log(`[Phase 1] RSS: ${rssStories.length} stories`);
     }
   } catch (e) {
-    errors.push(`rss: ${e instanceof Error ? e.message : 'failed'}`);
+    const msg = `RSS: ${e instanceof Error ? e.message : 'failed'}`;
+    errors.push(msg);
+    console.error(`[Phase 1] ${msg}`);
   }
 
-  // 3. GDELT (FREE - unlimited)
+  // 3. GDELT (FREE)
   try {
-    const gdeltStories = await fetchGDELT(region, limit);
+    console.log('[Phase 1] Fetching GDELT...');
+    const gdeltStories = await fetchWithTimeout(
+      () => fetchGDELT(region, limit),
+      10000,
+      'GDELT'
+    );
     if (gdeltStories.length > 0) {
       stories.push(...gdeltStories);
       sourcesUsed.push('gdelt');
+      console.log(`[Phase 1] GDELT: ${gdeltStories.length} stories`);
     }
   } catch (e) {
-    errors.push(`gdelt: ${e instanceof Error ? e.message : 'failed'}`);
+    const msg = `GDELT: ${e instanceof Error ? e.message : 'failed'}`;
+    errors.push(msg);
+    console.error(`[Phase 1] ${msg}`);
   }
 
-  // 4. Hacker News for tech/global (FREE - unlimited)
+  // 4. Hacker News for tech/global (FREE)
   if (region === 'tech' || region === 'global') {
     try {
-      const hnStories = await fetchHackerNews();
+      console.log('[Phase 1] Fetching Hacker News...');
+      const hnStories = await fetchWithTimeout(fetchHackerNews, 5000, 'Hacker News');
       if (hnStories.length > 0) {
         stories.push(...hnStories);
         sourcesUsed.push('hackernews');
+        console.log(`[Phase 1] HN: ${hnStories.length} stories`);
       }
     } catch (e) {
-      errors.push(`hackernews: ${e instanceof Error ? e.message : 'failed'}`);
+      const msg = `HackerNews: ${e instanceof Error ? e.message : 'failed'}`;
+      errors.push(msg);
+      console.error(`[Phase 1] ${msg}`);
     }
   }
 
-  // ========== PHASE 2: ONLY IF FREE SOURCES ARE INSUFFICIENT ==========
+  debugInfo.phases.push({
+    phase: 1,
+    sourceCount: stories.length,
+    sources: [...sourcesUsed],
+    errors: [...errors]
+  });
+
+  // ========== PHASE 2: FREEMIUM APIs (if needed) ==========
   
-  // If we have less than 5 stories from free sources, try World News API (500/day)
   if (stories.length < 5 && env.WORLD_NEWS_API_KEY) {
     try {
-      const wnStories = await fetchWorldNewsAPI(env.WORLD_NEWS_API_KEY, region, limit);
+      console.log('[Phase 2] Fetching World News API...');
+      const wnStories = await fetchWithTimeout(
+        () => fetchWorldNewsAPI(env.WORLD_NEWS_API_KEY!, region, limit),
+        8000,
+        'World News API'
+      );
       if (wnStories.length > 0) {
         stories.push(...wnStories);
         sourcesUsed.push('worldnews');
+        console.log(`[Phase 2] WorldNews: ${wnStories.length} stories`);
       }
     } catch (e) {
-      errors.push(`worldnews: ${e instanceof Error ? e.message : 'failed'}`);
+      const msg = `WorldNews: ${e instanceof Error ? e.message : 'failed'}`;
+      errors.push(msg);
+      console.error(`[Phase 2] ${msg}`);
     }
   }
 
-  // ========== PHASE 3: LAST RESORT - STRICT LIMIT APIs ==========
+  debugInfo.phases.push({
+    phase: 2,
+    sourceCount: stories.length,
+    sources: [...sourcesUsed],
+    errors: [...errors]
+  });
+
+  // ========== PHASE 3: STRICT LIMIT APIs (emergency only) ==========
   
-  // Only call these if we STILL have almost nothing (emergency fallback)
   if (stories.length < 3) {
+    console.log('[Phase 3] EMERGENCY: Free sources insufficient, trying paid APIs...');
+    
     if (env.NEWSDATA_API_KEY) {
       try {
-        const ndStories = await fetchNewsData(env.NEWSDATA_API_KEY, region, limit);
+        console.log('[Phase 3] Fetching NewsData.io...');
+        const ndStories = await fetchWithTimeout(
+          () => fetchNewsData(env.NEWSDATA_API_KEY!, region, limit),
+          8000,
+          'NewsData.io'
+        );
         if (ndStories.length > 0) {
           stories.push(...ndStories);
           sourcesUsed.push('newsdata');
+          console.log(`[Phase 3] NewsData: ${ndStories.length} stories`);
         }
       } catch (e) {
-        errors.push(`newsdata: ${e instanceof Error ? e.message : 'failed'}`);
+        const msg = `NewsData: ${e instanceof Error ? e.message : 'failed'}`;
+        errors.push(msg);
+        console.error(`[Phase 3] ${msg}`);
       }
     }
 
-    if (env.GNEWS_API_KEY && stories.length < 3) {
+    if (stories.length < 3 && env.GNEWS_API_KEY) {
       try {
-        const gnStories = await fetchGNews(env.GNEWS_API_KEY, region, limit);
+        console.log('[Phase 3] Fetching GNews...');
+        const gnStories = await fetchWithTimeout(
+          () => fetchGNews(env.GNEWS_API_KEY!, region, limit),
+          8000,
+          'GNews'
+        );
         if (gnStories.length > 0) {
           stories.push(...gnStories);
           sourcesUsed.push('gnews');
+          console.log(`[Phase 3] GNews: ${gnStories.length} stories`);
         }
       } catch (e) {
-        errors.push(`gnews: ${e instanceof Error ? e.message : 'failed'}`);
+        const msg = `GNews: ${e instanceof Error ? e.message : 'failed'}`;
+        errors.push(msg);
+        console.error(`[Phase 3] ${msg}`);
       }
     }
   }
 
-  console.log(`Sources used: ${sourcesUsed.join(', ')}, Total stories: ${stories.length}, Errors: ${errors.length}`);
+  debugInfo.phases.push({
+    phase: 3,
+    sourceCount: stories.length,
+    sources: [...sourcesUsed],
+    errors: [...errors]
+  });
 
-  // If absolutely nothing worked, return fallback
+  console.log(`[SUMMARY] Total: ${stories.length} stories from ${sourcesUsed.join(', ') || 'NONE'}`);
+
+  // Return fallback if nothing worked
   if (stories.length === 0) {
-    return getFallbackStories(region);
+    return {
+      stories: getFallbackStories(region),
+      sourcesUsed: ['fallback'],
+      errors,
+      debug: debugInfo
+    };
   }
 
-  return deduplicateAndRank(stories).slice(0, limit);
+  return {
+    stories: deduplicateAndRank(stories).slice(0, limit),
+    sourcesUsed,
+    errors,
+    debug: debugInfo
+  };
 }
 
-// ==================== GUARDIAN API (FREE) ====================
+// Helper for timeouts
+async function fetchWithTimeout<T>(
+  fn: () => Promise<T>,
+  ms: number,
+  name: string
+): Promise<T> {
+  return Promise.race([
+    fn(),
+    new Promise<T>((_, reject) => 
+      setTimeout(() => reject(new Error(`${name} timeout`)), ms)
+    )
+  ]);
+}
+
+// ==================== API IMPLEMENTATIONS ====================
+
 async function fetchGuardianAPI(apiKey: string, region: string, limit: number): Promise<any[]> {
-  try {
-    const sectionMap: Record<string, string> = {
-      'africa': 'world',
-      'asia': 'world',
-      'persian-gulf': 'world',
-      'gulf': 'world',
-      'global': 'world',
-      'tech': 'technology',
-      'independent': 'world'
-    };
+  const sectionMap: Record<string, string> = {
+    'africa': 'world', 'asia': 'world', 'persian-gulf': 'world',
+    'gulf': 'world', 'global': 'world', 'tech': 'technology', 'independent': 'world'
+  };
+  const queryMap: Record<string, string> = {
+    'africa': 'africa', 'asia': 'asia', 'persian-gulf': 'middleeast', 'gulf': 'middleeast'
+  };
 
-    const queryMap: Record<string, string> = {
-      'africa': 'africa',
-      'asia': 'asia',
-      'persian-gulf': 'middleeast',
-      'gulf': 'middleeast'
-    };
+  const section = sectionMap[region] || 'world';
+  const query = queryMap[region];
+  
+  let url = `https://content.guardianapis.com/search?api-key=${apiKey}&section=${section}&show-fields=trailText,thumbnail,byline,headline&page-size=${limit}&order-by=newest`;
+  if (query) url += `&q=${encodeURIComponent(query)}`;
 
-    const section = sectionMap[region] || 'world';
-    const query = queryMap[region];
-    
-    let url = `https://content.guardianapis.com/search?api-key=${apiKey}&section=${section}&show-fields=trailText,thumbnail,byline,headline&page-size=${limit}&order-by=newest`;
-    
-    if (query) {
-      url += `&q=${encodeURIComponent(query)}`;
-    }
-
-    const response = await fetch(url, { 
-      cf: { cacheTtl: 600 },
-      headers: { 'Accept': 'application/json' }
-    });
-    
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`);
-    }
-    
-    const data = await response.json();
-    
-    if (data.response?.status !== 'ok') {
-      throw new Error(data.response?.message || 'API error');
-    }
-    
-    return (data.response?.results || []).map((item: any) => ({
-      id: `guardian-${item.id}`,
-      title: item.webTitle,
-      description: item.fields?.trailText || item.fields?.headline || '',
-      url: item.webUrl,
-      image: item.fields?.thumbnail || null,
-      source: 'The Guardian',
-      publishedAt: item.webPublicationDate || new Date().toISOString(),
-      region: region,
-      category: item.sectionName?.toLowerCase() || 'general',
-      apiSource: 'guardian',
-      isBreaking: isRecent(item.webPublicationDate, 60),
-    }));
-  } catch (e) {
-    console.error('Guardian API error:', e);
-    return [];
-  }
+  const response = await fetch(url, { 
+    cf: { cacheTtl: 600 },
+    headers: { 'Accept': 'application/json' }
+  });
+  
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  
+  const data = await response.json();
+  if (data.response?.status !== 'ok') throw new Error(data.response?.message || 'API error');
+  
+  return (data.response?.results || []).map((item: any) => ({
+    id: `guardian-${item.id}`,
+    title: item.webTitle,
+    description: item.fields?.trailText || item.fields?.headline || '',
+    url: item.webUrl,
+    image: item.fields?.thumbnail || null,
+    source: 'The Guardian',
+    publishedAt: item.webPublicationDate || new Date().toISOString(),
+    region: region,
+    category: item.sectionName?.toLowerCase() || 'general',
+    apiSource: 'guardian',
+    isBreaking: isRecent(item.webPublicationDate, 60),
+  }));
 }
 
-// ==================== WORLD NEWS API (500/day) ====================
 async function fetchWorldNewsAPI(apiKey: string, region: string, limit: number): Promise<any[]> {
-  try {
-    const countryMap: Record<string, string> = {
-      'africa': 'ng,za,ke,eg,gh,et,ug,tz',
-      'asia': 'in,cn,jp,kr,id,th,vn,my,sg,ph',
-      'persian-gulf': 'ae,sa,qa,kw,bh,om',
-      'gulf': 'ae,sa,qa,kw',
-      'global': 'us,gb,ca,au',
-      'tech': 'us,gb',
-      'independent': 'us,gb'
-    };
+  const countryMap: Record<string, string> = {
+    'africa': 'ng,za,ke,eg,gh,et', 'asia': 'in,cn,jp,kr,id,th,vn',
+    'persian-gulf': 'ae,sa,qa,kw,bh,om', 'gulf': 'ae,sa,qa,kw',
+    'global': 'us,gb,ca', 'tech': 'us,gb', 'independent': 'us,gb'
+  };
 
-    const countries = countryMap[region] || 'us,gb';
-    const url = `https://api.worldnewsapi.com/search-news?api-key=${apiKey}&number=${limit}&language=en&source-country=${countries}`;
-    
-    const response = await fetch(url, { 
-      cf: { cacheTtl: 600 },
-      headers: { 'Accept': 'application/json' }
-    });
-    
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`);
-    }
-    
-    const data = await response.json();
-    
-    return (data.news || []).map((item: any, idx: number) => ({
-      id: `wn-${idx}-${Date.now()}`,
-      title: item.title,
-      description: item.text?.substring(0, 300) || '',
-      url: item.url,
-      image: item.image || null,
-      source: item.source_name || 'World News',
-      publishedAt: item.publish_date || new Date().toISOString(),
-      region: region,
-      category: item.category || 'general',
-      apiSource: 'worldnews',
-      isBreaking: isRecent(item.publish_date, 60),
-    }));
-  } catch (e) {
-    console.error('World News API error:', e);
-    return [];
-  }
+  const countries = countryMap[region] || 'us,gb';
+  const url = `https://api.worldnewsapi.com/search-news?api-key=${apiKey}&number=${limit}&language=en&source-country=${countries}`;
+  
+  const response = await fetch(url, { 
+    cf: { cacheTtl: 600 },
+    headers: { 'Accept': 'application/json' }
+  });
+  
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  
+  const data = await response.json();
+  
+  return (data.news || []).map((item: any, idx: number) => ({
+    id: `wn-${idx}-${Date.now()}`,
+    title: item.title,
+    description: item.text?.substring(0, 300) || '',
+    url: item.url,
+    image: item.image || null,
+    source: item.source_name || 'World News',
+    publishedAt: item.publish_date || new Date().toISOString(),
+    region: region,
+    category: item.category || 'general',
+    apiSource: 'worldnews',
+    isBreaking: isRecent(item.publish_date, 60),
+  }));
 }
 
-// ==================== HACKER NEWS (FREE) ====================
 async function fetchHackerNews(): Promise<any[]> {
-  try {
-    const response = await fetch('https://hacker-news.firebaseio.com/v0/topstories.json', {
-      cf: { cacheTtl: 300 }
-    });
-    
-    if (!response.ok) throw new Error('Failed to fetch');
-    
-    const storyIds = await response.json() as number[];
-    const topIds = storyIds.slice(0, 15);
-    
-    const stories = await Promise.all(
-      topIds.map(async (id) => {
-        try {
-          const res = await fetch(`https://hacker-news.firebaseio.com/v0/item/${id}.json`, {
-            cf: { cacheTtl: 300 }
-          });
-          if (!res.ok) return null;
-          return await res.json();
-        } catch {
-          return null;
-        }
-      })
-    );
-    
-    return stories
-      .filter((s): s is any => s !== null && s.title)
-      .map(story => ({
-        id: `hn-${story.id}`,
-        title: story.title,
-        description: `Score: ${story.score} | Comments: ${story.descendants || 0}`,
-        url: story.url || `https://news.ycombinator.com/item?id=${story.id}`,
-        image: null,
-        source: 'Hacker News',
-        publishedAt: new Date(story.time * 1000).toISOString(),
-        region: 'global',
-        category: 'technology',
-        apiSource: 'hackernews',
-        isBreaking: false,
-      }));
-  } catch (e) {
-    console.error('HackerNews error:', e);
-    return [];
-  }
+  const response = await fetch('https://hacker-news.firebaseio.com/v0/topstories.json', {
+    cf: { cacheTtl: 300 }
+  });
+  
+  if (!response.ok) throw new Error('Failed to fetch');
+  
+  const storyIds = await response.json() as number[];
+  const topIds = storyIds.slice(0, 15);
+  
+  const stories = await Promise.all(
+    topIds.map(async (id) => {
+      try {
+        const res = await fetch(`https://hacker-news.firebaseio.com/v0/item/${id}.json`, {
+          cf: { cacheTtl: 300 }
+        });
+        if (!res.ok) return null;
+        return await res.json();
+      } catch { return null; }
+    })
+  );
+  
+  return stories
+    .filter((s): s is any => s !== null && s.title)
+    .map(story => ({
+      id: `hn-${story.id}`,
+      title: story.title,
+      description: `Score: ${story.score} | Comments: ${story.descendants || 0}`,
+      url: story.url || `https://news.ycombinator.com/item?id=${story.id}`,
+      image: null,
+      source: 'Hacker News',
+      publishedAt: new Date(story.time * 1000).toISOString(),
+      region: 'global',
+      category: 'technology',
+      apiSource: 'hackernews',
+      isBreaking: false,
+    }));
 }
 
-// ==================== NEWSDATA.IO (200/day - LAST RESORT) ====================
 async function fetchNewsData(apiKey: string, region: string, limit: number): Promise<any[]> {
-  try {
-    const countryMap: Record<string, string> = {
-      'africa': 'ng,za,ke,eg,gh',
-      'asia': 'in,cn,jp,kr,id',
-      'persian-gulf': 'ae,sa,qa,kw,bh,om',
-      'gulf': 'ae,sa,qa,kw',
-      'global': 'us,gb,ca',
-      'tech': 'us,gb',
-      'independent': 'us,gb'
-    };
+  const countryMap: Record<string, string> = {
+    'africa': 'ng,za,ke,eg,gh', 'asia': 'in,cn,jp,kr,id',
+    'persian-gulf': 'ae,sa,qa,kw,bh,om', 'gulf': 'ae,sa,qa,kw',
+    'global': 'us,gb,ca', 'tech': 'us,gb', 'independent': 'us,gb'
+  };
 
-    const countries = countryMap[region] || 'us,gb';
-    // FIXED: Removed space after apikey=
-    const url = `https://newsdata.io/api/1/news?apikey=${apiKey}&country=${countries}&language=en&size=${limit}`;
-    
-    const response = await fetch(url, { 
-      cf: { cacheTtl: 300 },
-      headers: { 'Accept': 'application/json' }
-    });
-    
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`);
-    }
-    
-    const data = await response.json();
-    
-    if (data.status !== 'success') {
-      throw new Error(data.message || 'API error');
-    }
-    
-    return (data.results || []).map((item: any) => ({
-      id: `nd-${item.article_id || hashString(item.link)}`,
-      title: item.title,
-      description: item.description || item.content?.slice(0, 200) || '',
-      url: item.link,
-      image: item.image_url || null,
-      source: item.source_id || 'Unknown',
-      publishedAt: item.pubDate || new Date().toISOString(),
-      region: detectRegion(item.country, region),
-      category: item.category?.[0] || 'general',
-      apiSource: 'newsdata',
-      isBreaking: isRecent(item.pubDate, 30),
-    }));
-  } catch (e) {
-    console.error('NewsData error:', e);
-    return [];
-  }
+  const countries = countryMap[region] || 'us,gb';
+  const url = `https://newsdata.io/api/1/news?apikey=${apiKey}&country=${countries}&language=en&size=${limit}`;
+  
+  const response = await fetch(url, { 
+    cf: { cacheTtl: 300 },
+    headers: { 'Accept': 'application/json' }
+  });
+  
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  
+  const data = await response.json();
+  if (data.status !== 'success') throw new Error(data.message || 'API error');
+  
+  return (data.results || []).map((item: any) => ({
+    id: `nd-${item.article_id || hashString(item.link)}`,
+    title: item.title,
+    description: item.description || item.content?.slice(0, 200) || '',
+    url: item.link,
+    image: item.image_url || null,
+    source: item.source_id || 'Unknown',
+    publishedAt: item.pubDate || new Date().toISOString(),
+    region: detectRegion(item.country, region),
+    category: item.category?.[0] || 'general',
+    apiSource: 'newsdata',
+    isBreaking: isRecent(item.pubDate, 30),
+  }));
 }
 
-// ==================== GNEWS (100/day - LAST RESORT) ====================
 async function fetchGNews(apiKey: string, region: string, limit: number): Promise<any[]> {
-  try {
-    const countryMap: Record<string, string> = {
-      'africa': 'ng,za,ke',
-      'asia': 'in,jp,kr',
-      'persian-gulf': 'ae,sa',
-      'gulf': 'ae,sa',
-      'global': 'us,gb',
-      'tech': 'us',
-      'independent': 'us'
-    };
+  const countryMap: Record<string, string> = {
+    'africa': 'ng,za,ke', 'asia': 'in,jp,kr', 'persian-gulf': 'ae,sa',
+    'gulf': 'ae,sa', 'global': 'us,gb', 'tech': 'us', 'independent': 'us'
+  };
 
-    const countries = countryMap[region] || 'us';
-    // FIXED: Removed space after apikey=
-    const url = `https://gnews.io/api/v4/top-headlines?apikey=${apiKey}&country=${countries}&lang=en&max=${limit}`;
-    
-    const response = await fetch(url, {
-      headers: { 'Accept': 'application/json' }
-    });
-    
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`);
-    }
-    
-    const data = await response.json();
-    
-    return (data.articles || []).map((item: any) => ({
-      id: `gn-${hashString(item.url)}`,
-      title: item.title,
-      description: item.description || '',
-      url: item.url,
-      image: item.image || null,
-      source: item.source?.name || 'Unknown',
-      publishedAt: item.publishedAt || new Date().toISOString(),
-      region: region,
-      category: 'general',
-      apiSource: 'gnews',
-      isBreaking: isRecent(item.publishedAt, 30),
-    }));
-  } catch (e) {
-    console.error('GNews error:', e);
-    return [];
-  }
+  const countries = countryMap[region] || 'us';
+  const url = `https://gnews.io/api/v4/top-headlines?apikey=${apiKey}&country=${countries}&lang=en&max=${limit}`;
+  
+  const response = await fetch(url, {
+    headers: { 'Accept': 'application/json' }
+  });
+  
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  
+  const data = await response.json();
+  
+  return (data.articles || []).map((item: any) => ({
+    id: `gn-${hashString(item.url)}`,
+    title: item.title,
+    description: item.description || '',
+    url: item.url,
+    image: item.image || null,
+    source: item.source?.name || 'Unknown',
+    publishedAt: item.publishedAt || new Date().toISOString(),
+    region: region,
+    category: 'general',
+    apiSource: 'gnews',
+    isBreaking: isRecent(item.publishedAt, 30),
+  }));
 }
 
-// ==================== FULL RSS FEEDS ====================
 async function fetchRSSFeeds(region: string): Promise<any[]> {
   const feeds: Record<string, string[]> = {
     'africa': [
@@ -440,7 +469,6 @@ async function fetchRSSFeeds(region: string): Promise<any[]> {
       'https://nation.africa/kenya/feed',
       'https://www.standardmedia.co.ke/rss/kenya.php',
       'https://dailynewsegypt.com/feed/',
-      'https://www.theeastafrican.co.ke/rss.xml',
     ],
     'asia': [
       'https://timesofindia.indiatimes.com/rssfeedstopstories.cms',
@@ -489,11 +517,11 @@ async function fetchRSSFeeds(region: string): Promise<any[]> {
   const regionKey = region === 'gulf' ? 'persian-gulf' : region;
   const regionFeeds = feeds[regionKey] || feeds['global'];
   
-  // Fetch all feeds in parallel with individual timeouts
+  // Fetch all feeds in parallel with aggressive timeouts
   const feedPromises = regionFeeds.map(async (feedUrl) => {
     try {
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 5000); // 5s per feed
+      const timeout = setTimeout(() => controller.abort(), 4000); // 4s timeout per feed
       
       const response = await fetch(feedUrl, {
         signal: controller.signal,
@@ -527,7 +555,7 @@ async function fetchRSSFeeds(region: string): Promise<any[]> {
         isBreaking: isRecent(item.pubDate, 60),
       }));
     } catch (e) {
-      return []; // Silent fail for individual feeds
+      return []; // Silent fail
     }
   });
   
@@ -535,72 +563,55 @@ async function fetchRSSFeeds(region: string): Promise<any[]> {
   return results.flat();
 }
 
-// ==================== GDELT (FREE) ====================
 async function fetchGDELT(region: string, limit: number): Promise<any[]> {
-  try {
-    const themeMap: Record<string, string> = {
-      'africa': 'africa',
-      'asia': 'asia',
-      'persian-gulf': 'gcc',
-      'gulf': 'gcc',
-      'global': 'world',
-      'tech': 'world',
-      'independent': 'world'
-    };
+  const themeMap: Record<string, string> = {
+    'africa': 'africa', 'asia': 'asia', 'persian-gulf': 'gcc',
+    'gulf': 'gcc', 'global': 'world', 'tech': 'world', 'independent': 'world'
+  };
 
-    const geo = themeMap[region] || 'world';
-    const url = `https://api.gdeltproject.org/api/v2/doc/doc?query=theme:CONFLICT%20OR%20theme:PROTEST%20OR%20theme:ELECTION%20AND%20geo:${geo}&mode=artlist&maxrecords=${limit}&format=json`;
-    
-    const response = await fetch(url, {
-      cf: { cacheTtl: 300 }
-    });
-    
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`);
-    }
-    
-    const data = await response.json();
-    const articles = data.articles || [];
-    
-    return articles.map((item: any) => ({
-      id: `gdelt-${hashString(item.url || item.documentIdentifier)}`,
-      title: item.title || 'Untitled',
-      description: item.seen || item.domain || '',
-      url: item.url || `https://${item.domain}`,
-      image: null,
-      source: item.domain || 'GDELT',
-      publishedAt: item.seendate || new Date().toISOString(),
-      region: region,
-      category: 'conflict',
-      apiSource: 'gdelt',
-      isBreaking: true,
-    }));
-  } catch (e) {
-    console.error('GDELT error:', e);
-    return [];
-  }
+  const geo = themeMap[region] || 'world';
+  const url = `https://api.gdeltproject.org/api/v2/doc/doc?query=theme:CONFLICT%20OR%20theme:PROTEST%20OR%20theme:ELECTION%20AND%20geo:${geo}&mode=artlist&maxrecords=${limit}&format=json`;
+  
+  const response = await fetch(url, { cf: { cacheTtl: 300 } });
+  
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  
+  const data = await response.json();
+  const articles = data.articles || [];
+  
+  return articles.map((item: any) => ({
+    id: `gdelt-${hashString(item.url || item.documentIdentifier)}`,
+    title: item.title || 'Untitled',
+    description: item.seen || item.domain || '',
+    url: item.url || `https://${item.domain}`,
+    image: null,
+    source: item.domain || 'GDELT',
+    publishedAt: item.seendate || new Date().toISOString(),
+    region: region,
+    category: 'conflict',
+    apiSource: 'gdelt',
+    isBreaking: true,
+  }));
 }
 
-// ==================== FALLBACK ====================
 function getFallbackStories(region: string): any[] {
-  return [
-    {
-      id: `fallback-${Date.now()}`,
-      title: 'News temporarily unavailable',
-      description: 'All news sources are currently unreachable. This is usually temporary. Please try again in a few minutes.',
-      url: 'https://news.ycombinator.com',
-      image: null,
-      source: 'Nexus System',
-      publishedAt: new Date().toISOString(),
-      region: region,
-      category: 'system',
-      apiSource: 'fallback',
-      isBreaking: false,
-    }
-  ];
+  return [{
+    id: `fallback-${Date.now()}`,
+    title: 'News temporarily unavailable',
+    description: 'All news sources are currently unreachable. Please try again in a few minutes.',
+    url: 'https://news.ycombinator.com',
+    image: null,
+    source: 'Nexus System',
+    publishedAt: new Date().toISOString(),
+    region: region,
+    category: 'system',
+    apiSource: 'fallback',
+    isBreaking: false,
+  }];
 }
 
 // ==================== UTILITIES ====================
+
 function deduplicateAndRank(stories: any[]): any[] {
   const seen = new Set<string>();
   const unique: any[] = [];
@@ -633,9 +644,7 @@ function isRecent(dateStr: string | undefined, minutes: number): boolean {
     if (isNaN(date.getTime())) return false;
     const diff = (Date.now() - date.getTime()) / 1000 / 60;
     return diff < minutes;
-  } catch {
-    return false;
-  }
+  } catch { return false; }
 }
 
 function detectRegion(countryCode: string | undefined, fallback: string): string {
@@ -654,8 +663,7 @@ function detectRegion(countryCode: string | undefined, fallback: string): string
 function detectCategoryFromSource(url: string): string {
   const lower = url.toLowerCase();
   if (lower.includes('tech') || lower.includes('wired') || lower.includes('verge')) return 'technology';
-  if (lower.includes('business') || lower.includes('economist') || lower.includes('forbes')) return 'business';
-  if (lower.includes('sport')) return 'sports';
+  if (lower.includes('business') || lower.includes('economist')) return 'business';
   return 'general';
 }
 
@@ -682,9 +690,7 @@ function parseRSS(xml: string): any[] {
       const link = extractAtomLink(entry);
       const content = extractTag(entry, 'content') || extractTag(entry, 'summary');
       const published = extractTag(entry, 'published') || extractTag(entry, 'updated');
-      if (title && link) {
-        items.push({ title, link: link.trim(), description: content, pubDate: published });
-      }
+      if (title && link) items.push({ title, link: link.trim(), description: content, pubDate: published });
     }
   } else {
     const itemRegex = /<item[\s\S]*?<\/item>/gi;
@@ -694,9 +700,7 @@ function parseRSS(xml: string): any[] {
       const link = extractTag(item, 'link') || extractAttribute(item, 'link', 'href');
       const description = extractTag(item, 'description') || extractTag(item, 'summary');
       const pubDate = extractTag(item, 'pubDate');
-      if (title && link) {
-        items.push({ title, link: link.trim(), description, pubDate });
-      }
+      if (title && link) items.push({ title, link: link.trim(), description, pubDate });
     }
   }
   return items;
@@ -709,11 +713,7 @@ function extractAtomLink(entry: string): string | null {
 
 function cleanText(text: string | null): string {
   if (!text) return '';
-  return text
-    .replace(/<!\[CDATA\[|\]\]>/g, '')
-    .replace(/<[^>]*>/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
+  return text.replace(/<!\[CDATA\[|\]\]>/g, '').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
 function extractTag(xml: string, tag: string): string | null {
@@ -730,13 +730,9 @@ function extractAttribute(xml: string, tag: string, attr: string): string | null
 
 function extractSourceFromRSS(xml: string, url: string): string {
   const channelTitle = extractTag(xml, 'title');
-  if (channelTitle) {
-    return channelTitle.replace(' - RSS Feed', '').replace(' RSS', '').trim();
-  }
+  if (channelTitle) return channelTitle.replace(' - RSS Feed', '').replace(' RSS', '').trim();
   try {
     const domain = new URL(url).hostname.replace('www.', '');
     return domain.split('.')[0].charAt(0).toUpperCase() + domain.split('.')[0].slice(1);
-  } catch {
-    return 'RSS Source';
-  }
+  } catch { return 'RSS Source'; }
 }
